@@ -39,6 +39,7 @@
 
 #include "congo_perc_synth.h"
 #include "congo_gorilla_synth.h"
+#include "zaxxon_hw.h"   /* Zaxxon board (second game): ROM sets, memory map, video, discrete sound */
 
 namespace cb {
 
@@ -344,7 +345,7 @@ static const RomFile *find_rom(const std::vector<RomFile> &files, const RomSpec 
 	return nullptr;
 }
 
-static bool load_roms(const std::vector<RomFile> &files, RomSet &rs, bool sound_only)
+static bool load_roms(const std::vector<RomFile> &files, RomSet &rs, bool sound_only, bool quiet = false)
 {
 	bool ok = true;
 	for (int i = 0; i < R_COUNT; i++) {
@@ -352,13 +353,13 @@ static bool load_roms(const std::vector<RomFile> &files, RomSet &rs, bool sound_
 		bool crc_ok = false;
 		const RomFile *f = find_rom(files, SPECS[i], crc_ok);
 		if (!f) {
-			fprintf(stderr, "missing ROM: %-13s (%s, CRC %08x)\n", SPECS[i].what, SPECS[i].name[0], SPECS[i].crc[0]);
+			if (!quiet) fprintf(stderr, "missing ROM: %-13s (%s, CRC %08x)\n", SPECS[i].what, SPECS[i].name[0], SPECS[i].crc[0]);
 			ok = false;
 			continue;
 		}
-		if (!crc_ok) fprintf(stderr, "warning: %s found by name only (CRC %08x differs); using it anyway\n", f->name.c_str(), f->crc);
+		if (!crc_ok && !quiet) fprintf(stderr, "warning: %s found by name only (CRC %08x differs); using it anyway\n", f->name.c_str(), f->crc);
 		rs.d[i] = f->data;
-		if (rs.d[i].size() < SPECS[i].size) { fprintf(stderr, "ROM %s is too short\n", f->name.c_str()); ok = false; }
+		if (rs.d[i].size() < SPECS[i].size) { if (!quiet) fprintf(stderr, "ROM %s is too short\n", f->name.c_str()); ok = false; }
 	}
 	return ok;
 }
@@ -1201,6 +1202,8 @@ struct Settings {
 	int show_fps = 0;
 	int window_scale = 0;    /* 0 = AUTO (largest whole-number size that fits the screen), else 1x, 2x, ... */
 	int vol_master = 100, vol_psg = 100, vol_perc = 100, vol_gor = 100, vol_bass = 100;   /* percent, 0..200 */
+	int vol_fx = 100;        /* Zaxxon: level of the sound-effect circuits (percent, 0..200) */
+	int zax_invert = 0;      /* Zaxxon: swap the stick's up and down */
 	int bass_soft = 1;       /* rounded bass-drum edges (removes the click) */
 	int treble = 2;          /* output low-pass: 0 off, 1 12 kHz, 2 8 kHz, 3 5 kHz, 4 3 kHz */
 	int font_mode = 0;       /* menu font: 0 auto (font.bmp, then character ROM, then built-in), 1 ROM only, 2 built-in */
@@ -1245,6 +1248,8 @@ static void settings_load(Settings &s)
 		else if (k == "vol_bass") s.vol_bass = clampi(v, 0, 200);
 		else if (k == "bass_soft") s.bass_soft = clampi(v, 0, 1);
 		else if (k == "vol_gorilla") s.vol_gor = clampi(v, 0, 200);
+		else if (k == "vol_zaxxon_fx") s.vol_fx = clampi(v, 0, 200);
+		else if (k == "zax_invert") s.zax_invert = clampi(v, 0, 1);
 		else if (k == "treble") s.treble = clampi(v, 0, 4);
 		else if (k == "font_mode") s.font_mode = clampi(v, 0, 2);
 		else if (k == "font_alpha") s.font_alpha = clampi(v, -1, 230);
@@ -1260,9 +1265,9 @@ static void settings_save(const Settings &s)
 	fprintf(f, "window_scale=%d\ncrt_look=%d\ncrt_curve=%d\ncrt_corner=%d\ncrt_scan=%d\ncrt_mask=%d\ncrt_glow=%d\ncrt_vignette=%d\ncrt_bright=%d\n",
 	        s.window_scale, s.crt_look, s.crt_custom.curve, s.crt_custom.corner, s.crt_custom.scan, s.crt_custom.mask, s.crt_custom.glow, s.crt_custom.vig, s.crt_custom.bright);
 	fprintf(f, "fullscreen=%d\ninteger_scale=%d\ncrt=%d\nrotate=%d\nshow_fps=%d\n"
-	           "vol_master=%d\nvol_psg=%d\nvol_drums=%d\nvol_gorilla=%d\nvol_bass=%d\nbass_soft=%d\ntreble=%d\nfont_mode=%d\nfont_alpha=%d\nfont_digit=%d\n",
+	           "vol_master=%d\nvol_psg=%d\nvol_drums=%d\nvol_gorilla=%d\nvol_bass=%d\nbass_soft=%d\ntreble=%d\nfont_mode=%d\nfont_alpha=%d\nfont_digit=%d\nvol_zaxxon_fx=%d\nzax_invert=%d\n",
 	        s.fullscreen, s.integer_scale, s.crt, s.rotate, s.show_fps,
-	        s.vol_master, s.vol_psg, s.vol_perc, s.vol_gor, s.vol_bass, s.bass_soft, s.treble, s.font_mode, s.font_alpha, s.font_digit);
+	        s.vol_master, s.vol_psg, s.vol_perc, s.vol_gor, s.vol_bass, s.bass_soft, s.treble, s.font_mode, s.font_alpha, s.font_digit, s.vol_fx, s.zax_invert);
 	fclose(f);
 }
 
@@ -1518,15 +1523,25 @@ static const uint8_t PS2P_GLYPHS[95][8] = {
 };
 
 #include "congo_logo_data.h"
+#include "zaxxon_logo_data.h"
+
+/* one of the two embedded vector logos */
+struct LogoSet {
+	const LogoPath *paths; size_t np; const LogoSub *subs; const float *pts; size_t npts;
+	const LogoPath *begin() const { return paths; }
+	const LogoPath *end() const { return paths + np; }
+};
+static const LogoSet LOGO_CONGO = { LOGO_PATHS, sizeof LOGO_PATHS / sizeof LOGO_PATHS[0], LOGO_SUBS, LOGO_PTS, sizeof LOGO_PTS / sizeof LOGO_PTS[0] / 2 };
+static const LogoSet LOGO_ZAXXON = { ZLOGO_PATHS, sizeof ZLOGO_PATHS / sizeof ZLOGO_PATHS[0], ZLOGO_SUBS, ZLOGO_PTS, sizeof ZLOGO_PTS / sizeof ZLOGO_PTS[0] / 2 };
 
 /* ---- vector logo: a small scanline rasteriser for the embedded Bezier paths (fill: non-zero winding with
  * 5x vertical and exact horizontal coverage; stroke: distance to the flattened outline, round joins, butt or
  * round caps).  The logo is redrawn at the real output size, so it stays sharp at any window size. ---- */
 struct LogoPt { float x, y; };
 
-static void logo_flatten(const LogoSub &sb, float sc, float ox, float oy, std::vector<LogoPt> &out)
+static void logo_flatten(const LogoSet &L, const LogoSub &sb, float sc, float ox, float oy, std::vector<LogoPt> &out)
 {
-	const float *p = &LOGO_PTS[sb.pt * 2];
+	const float *p = &L.pts[sb.pt * 2];
 	out.push_back({ p[0] * sc + ox, p[1] * sc + oy });
 	const float *q = p + 2;
 	for (int i = 0; i < sb.nseg; i++, q += 6) {
@@ -1541,14 +1556,14 @@ static void logo_flatten(const LogoSub &sb, float sc, float ox, float oy, std::v
 	}
 }
 
-static void logo_render(int wpx, std::vector<uint32_t> &out, int &W, int &H)
+static void logo_render(const LogoSet &L, int wpx, std::vector<uint32_t> &out, int &W, int &H)
 {
 	float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f, hwmax = 0;
-	for (auto &pp : LOGO_PATHS) hwmax = std::max(hwmax, pp.stroke ? pp.stroke_w * 0.5f : 0.0f);
-	const size_t npts = sizeof LOGO_PTS / sizeof LOGO_PTS[0] / 2;
+	for (auto &pp : L) hwmax = std::max(hwmax, pp.stroke ? pp.stroke_w * 0.5f : 0.0f);
+	const size_t npts = L.npts;
 	for (size_t i = 0; i < npts; i++) {
-		minx = std::min(minx, LOGO_PTS[i * 2]); maxx = std::max(maxx, LOGO_PTS[i * 2]);
-		miny = std::min(miny, LOGO_PTS[i * 2 + 1]); maxy = std::max(maxy, LOGO_PTS[i * 2 + 1]);
+		minx = std::min(minx, L.pts[i * 2]); maxx = std::max(maxx, L.pts[i * 2]);
+		miny = std::min(miny, L.pts[i * 2 + 1]); maxy = std::max(maxy, L.pts[i * 2 + 1]);
 	}
 	minx -= hwmax; miny -= hwmax; maxx += hwmax; maxy += hwmax;
 	const float sc = (float)wpx / (maxx - minx);
@@ -1563,9 +1578,9 @@ static void logo_render(int wpx, std::vector<uint32_t> &out, int &W, int &H)
 		}
 	};
 	std::vector<std::vector<LogoPt>> polys;
-	for (auto &pp : LOGO_PATHS) {
+	for (auto &pp : L) {
 		polys.clear();
-		for (int s = 0; s < pp.n_sub; s++) { polys.emplace_back(); logo_flatten(LOGO_SUBS[pp.first_sub + s], sc, ox, oy, polys.back()); }
+		for (int s = 0; s < pp.n_sub; s++) { polys.emplace_back(); logo_flatten(L, L.subs[pp.first_sub + s], sc, ox, oy, polys.back()); }
 		if (pp.fill) {
 			std::fill(cov.begin(), cov.end(), 0.0f);
 			float y0 = 1e9f, y1 = -1e9f;
@@ -1607,7 +1622,7 @@ static void logo_render(int wpx, std::vector<uint32_t> &out, int &W, int &H)
 			std::fill(cov.begin(), cov.end(), 0.0f);
 			const float hw = pp.stroke_w * sc * 0.5f;
 			for (int s = 0; s < pp.n_sub; s++) {
-				const auto &pl = polys[s]; const bool closed = LOGO_SUBS[pp.first_sub + s].closed != 0;
+				const auto &pl = polys[s]; const bool closed = L.subs[pp.first_sub + s].closed != 0;
 				const size_t n = pl.size(), nseg = closed ? n : n - 1;
 				for (size_t i = 0; i < nseg; i++) {
 					const LogoPt a = pl[i], b = pl[(i + 1) % n];
@@ -1827,20 +1842,23 @@ using namespace cb;
 static void usage()
 {
 	printf(
-"Congo Bongo / Tip Top emulator (SDL3)\n"
+"Congo Bongo / Tip Top / Zaxxon emulator (SDL3), no samples\n"
 "\n"
 "usage: congobongo [options] [rom-zip-or-folder ...]\n"
 "\n"
 "  With no path, the folder 'roms' and the current folder are searched for\n"
-"  congo.zip / tiptop.zip or loose ROM files (matched by CRC32).\n"
+"  congo.zip / tiptop.zip / zaxxon.zip (or zaxxon2, zaxxon3, zaxxonj, zaxxonb) or loose ROM\n"
+"  files, matched by CRC32.  The game is detected from the ROMs.\n"
 "\n"
 "options:\n"
+"  --game NAME      congo or zaxxon: pick one when the ROMs of both are found (default: congo)\n"
+"  --set NAME       Zaxxon: zaxxon, zaxxon2, zaxxon3, zaxxonj or zaxxonb when several sets are present\n"
 "  --scale N        window scale (default 3)\n"
 "  --no-rotate      do not rotate the picture 90 degrees\n"
 "  --volume X       master volume, 0..2 (default 1)\n"
 "  --lives N        3, 4 or 5 (default 3);  --free-play\n"
 "  --bonus N        10000, 20000, 30000 or 40000 (default 10000)\n"
-"  --difficulty N   0 easy .. 3 hardest (default 1)\n"
+"  --difficulty N   0 easy .. 3 hardest (default 1; Congo Bongo only)\n"
 "  --font MODE      menu font: auto (default), rom, builtin.  A font.bmp next to the program\n"
 "                   (16 glyphs per row, 8x8 each, 6 rows = ASCII 32..127) overrides the ROM font\n"
 "  --poke ADDR:VAL  keep main-RAM byte ADDR (hex, 8000-8FFF) at VAL (hex), like a cheat; repeatable\n"
@@ -1853,9 +1871,12 @@ static void usage()
 "  --shot FILE      headless: save the last frame as a BMP\n"
 "  --shot-every N   headless: also save every Nth frame as FILE-<n>.bmp\n"
 "  --coin-at N      headless: insert a coin at frame N;  --start-at N presses 1P start\n"
-"  --cmd T:CMD      headless sound test: send command CMD at T seconds (e.g. 1.0:0x91)\n"
+"  --cmd T:CMD      headless sound test: send command CMD at T seconds (e.g. 1.0:0x91);\n"
+"                   Zaxxon: T:N plays circuit test sound N (0..10) at T seconds\n"
+"  --service-at N   headless Zaxxon: press the service switch (self test) at frame N\n"
 "\n"
-"keys: arrows = move, Z / Left Ctrl / Space = jump, 5 = coin, 1 / 2 = start,\n"
+"keys: arrows = move, Z / Left Ctrl / Space = jump (Zaxxon: fire), 5 = coin, 1 / 2 = start,\n"
+"      Zaxxon only: I = swap stick up/down, F2 = service switch (self test),\n"
 "      Esc = options menu (volumes, CRT, scaling, fullscreen), P = pause,\n"
 "      R = rotate view, F3 = reset, F11 = fullscreen, F12 = screenshot, +/- = master volume\n"
 "\n"
@@ -1874,6 +1895,8 @@ int main(int argc, char **argv)
 	std::vector<std::string> keyscript; size_t kidx = 0; int kwait = 0;   /* developer: --keys 30,esc,down,enter (numbers = wait that many frames) */
 	std::vector<std::pair<uint16_t, uint8_t>> cli_pokes;
 	int font_cli = 0; bool font_cli_set = false; std::string dump_font;
+	int game_cli = 0;                 /* --game: 0 auto, 1 congo, 2 zaxxon */
+	std::string zset_cli; int service_at = -1;   /* --set NAME (Zaxxon ROM set), --service-at N (headless) */
 	int dev_page = -1, dev_crt = -1; std::string dev_out;   /* developer: --menu-shot PAGE:FILE.bmp, --crt N */
 	int lives = 3, bonus = 10000, difficulty = 1;
 	struct InpEv { int f0, f1; unsigned bits; };
@@ -1894,6 +1917,9 @@ int main(int argc, char **argv)
 		};
 		if (a == "-h" || a == "--help") { usage(); return 0; }
 		else if (a == "--scale") scale = std::max(1, atoi(next("--scale")));
+		else if (a == "--game") { std::string v = next("--game"); game_cli = (v == "zaxxon" || v == "zax") ? 2 : (v == "congo" || v == "tiptop") ? 1 : 0; if (!game_cli) { fprintf(stderr, "--game wants congo or zaxxon\n"); return 1; } }
+		else if (a == "--set") zset_cli = next("--set");
+		else if (a == "--service-at") service_at = atoi(next("--service-at"));
 		else if (a == "--no-rotate") rotation = 0;
 		else if (a == "--volume") { volume = (float)atof(next("--volume")); vol_given = true; }
 		else if (a == "--lives") lives = atoi(next("--lives"));
@@ -1943,38 +1969,76 @@ int main(int argc, char **argv)
 		if (bp) { add_path(std::string(bp) + "roms", files); add_path(bp, files); }
 	} else for (auto &p : paths) add_path(p, files);
 
+	/* which game?  Congo Bongo unless only the Zaxxon ROMs are there (or --game says otherwise) */
 	static RomSet rs;
-	if (!load_roms(files, rs, sound_only)) {
-		fprintf(stderr,
-			"\nCould not find all the ROMs. Put the MAME congo.zip (and, for the tiptop set,\n"
-			"tiptop.zip as well) in a folder called 'roms' next to the program, or pass the\n"
-			"zip / folder on the command line.  For sound only, try --sound-test.\n");
-		return 1;
+	int zset = zx::detect_set(files);
+	if (!zset_cli.empty()) {      /* --set: choose one Zaxxon ROM set when several are present */
+		int want = -1;
+		for (int i = 0; i < zx::N_SETS; i++) if (zset_cli == zx::SETS[i].name) want = i;
+		if (want < 0) { fprintf(stderr, "unknown Zaxxon set '%s' (zaxxon, zaxxon2, zaxxon3, zaxxonj, zaxxonb)\n", zset_cli.c_str()); return 1; }
+		zset = -1;
+		{ std::vector<RomFile> only; for (auto &f : files) only.push_back(f); for (int i = 0; i < zx::N_SETS; i++) if (i == want) { bool has[3] = { false, false, false }; for (auto &f : only) for (int k = 0; k < 3; k++) if (f.crc == zx::SETS[i].main_crc[k]) has[k] = true; if (has[0] && has[1] && has[2]) zset = i; } }
+		if (zset < 0) { fprintf(stderr, "the ROMs of Zaxxon set '%s' were not found\n", zset_cli.c_str()); return 1; }
+		if (game_cli == 0) game_cli = 2;
+	}
+	bool zax = false;
+	{
+		const bool congo_ok = load_roms(files, rs, sound_only, true);
+		if (game_cli == 2) zax = true;
+		else if (game_cli == 1) zax = false;
+		else zax = !congo_ok && zset >= 0 && !sound_only;
+		if (zax && sound_only) { fprintf(stderr, "--sound-test is only available for Congo Bongo\n"); return 1; }
+		if (zax && zset < 0) { fprintf(stderr, "No Zaxxon ROMs found. Put the MAME zaxxon.zip (or zaxxon2, zaxxon3, zaxxonj, zaxxonb) in a folder called 'roms' next to the program.\n"); return 1; }
+		if (!zax && !congo_ok) {
+			load_roms(files, rs, sound_only);   /* again, this time listing what is missing */
+			fprintf(stderr,
+				"\nCould not find all the ROMs. Put the MAME congo.zip (and, for the tiptop set,\n"
+				"tiptop.zip as well) in a folder called 'roms' next to the program, or pass the\n"
+				"zip / folder on the command line.  For Zaxxon use zaxxon.zip.  For sound only, try --sound-test.\n");
+			return 1;
+		}
+		if (!zax && congo_ok && zset >= 0 && game_cli == 0) fprintf(stderr, "Congo Bongo and Zaxxon ROMs found: starting Congo Bongo (use --game zaxxon for Zaxxon)\n");
 	}
 
+	static zx::Board ZB;
+	zx::Board &zb = ZB;
 	Machine &m = M;
-	m.sound_only = sound_only;
-	m.volume = volume;
-	memcpy(m.srom, rs.d[R_SND].data(), 0x2000);
-	if (!sound_only) {
-		for (int i = 0; i < 4; i++) memcpy(m.mrom + i * 0x2000, rs.d[R_M1 + i].data(), 0x2000);
-		m.decode_gfx(rs);
-	}
-	/* DIP switches */
-	{
+	{   /* DIP switches (the same option numbers drive both games) */
 		int b = 0x03;
 		if (bonus == 20000) b = 0x01; else if (bonus == 30000) b = 0x02; else if (bonus == 40000) b = 0x00;
-		int d = difficulty == 0 ? 0x0c : difficulty == 2 ? 0x08 : difficulty == 3 ? 0x00 : 0x04;
 		int l = free_play ? 0x00 : lives == 4 ? 0x10 : lives == 5 ? 0x20 : 0x30;
-		m.dsw02 = (uint8_t)(b | d | l | 0x40);
+		if (zax) {
+			std::string err;
+			if (!zb.load(files, zset, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+			fprintf(stderr, "Zaxxon: %s\n", zx::SETS[zset].title);
+			zb.dsw02 = (uint8_t)(b | 0x0c | l | 0x40);        /* bonus ship, 3/4/5 ships or free play, sound on, upright */
+			zb.volume = volume;
+			zb.reset();
+		} else {
+			m.sound_only = sound_only;
+			m.volume = volume;
+			memcpy(m.srom, rs.d[R_SND].data(), 0x2000);
+			if (!sound_only) {
+				for (int i = 0; i < 4; i++) memcpy(m.mrom + i * 0x2000, rs.d[R_M1 + i].data(), 0x2000);
+				m.decode_gfx(rs);
+			}
+			int d = difficulty == 0 ? 0x0c : difficulty == 2 ? 0x08 : difficulty == 3 ? 0x00 : 0x04;
+			m.dsw02 = (uint8_t)(b | d | l | 0x40);
+			m.reset();
+			m.pokes = cli_pokes; m.sync_locks();
+			if (bass_edge_cli >= 0) m.bass_soft = bass_edge_cli != 0;
+			if (vol_bass_cli >= 0) m.vol_bass = vol_bass_cli;
+			if (vol_cli[0] >= 0) m.vol_psg = vol_cli[0];
+			if (vol_cli[1] >= 0) m.vol_perc = vol_cli[1];
+			if (vol_cli[2] >= 0) m.vol_gor = vol_cli[2];
+		}
 	}
-	m.reset();
-	m.pokes = cli_pokes; m.sync_locks();
-	if (bass_edge_cli >= 0) m.bass_soft = bass_edge_cli != 0;
-	if (vol_bass_cli >= 0) m.vol_bass = vol_bass_cli;
-	if (vol_cli[0] >= 0) m.vol_psg = vol_cli[0];
-	if (vol_cli[1] >= 0) m.vol_perc = vol_cli[1];
-	if (vol_cli[2] >= 0) m.vol_gor = vol_cli[2];
+	const uint8_t *txp = zax ? zb.txpix : m.txpix;      /* character tiles, for the menu font */
+	const char *game_name = zax ? "Zaxxon" : "Congo Bongo";
+	auto run_game_frame = [&]() { if (zax) zb.run_frame(); else m.run_frame(); };
+	auto game_audio = [&]() -> std::vector<int16_t> & { return zax ? zb.audio : m.audio; };
+	auto game_fb = [&]() -> const uint32_t * { return zax ? zb.fb : m.fb; };
+	auto game_reset = [&]() { if (zax) zb.reset(); else m.reset(); };
 
 	/* ---- menu font: font.bmp > character ROM > built-in ---- */
 	static MenuFont mfont;
@@ -1992,7 +2056,7 @@ int main(int argc, char **argv)
 		if (mode != 2) {
 			uint8_t tmp[128][8]; memcpy(tmp, mfont.g, sizeof tmp);
 			double conf = 0;
-			if (detect_rom_font(m.txpix, fa, fd, tmp, mfont.info, sizeof mfont.info, &conf)) memcpy(mfont.g, tmp, sizeof tmp);
+			if (detect_rom_font(txp, fa, fd, tmp, mfont.info, sizeof mfont.info, &conf)) memcpy(mfont.g, tmp, sizeof tmp);
 		}
 	};
 	if (!dump_font.empty()) {
@@ -2008,7 +2072,7 @@ int main(int argc, char **argv)
 				for (int yy = 0; yy < S; yy++) for (int xx = 0; xx < S; xx++)
 					img[(size_t)(((c - 32) >> 4) * 8 * S + y * S + yy) * W + ((c & 15) * 8 + x) * S + xx] = 0xffffff00u;
 		for (int t = 0; t < 256 && !sound_only; t++) for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
-			int p = m.txpix[t * 64 + y * 8 + x]; if (!p) continue;
+			int p = txp[t * 64 + y * 8 + x]; if (!p) continue;
 			uint32_t col = p == 1 ? 0xff80ff80u : p == 2 ? 0xffff8080u : 0xffffffffu;
 			for (int yy = 0; yy < S; yy++) for (int xx = 0; xx < S; xx++)
 				img[(size_t)((52 + (t >> 4) * 8 + y) * S + yy) * W + ((t & 15) * 8 + x) * S + xx] = col;
@@ -2020,6 +2084,28 @@ int main(int argc, char **argv)
 	/* ================================================================= */
 	/*  headless mode                                                    */
 	/* ================================================================= */
+	if (headless && zax) {
+		std::vector<int16_t> all; std::vector<uint32_t> view; int w, h;
+		for (int f = 0; f < frames_to_run; f++) {
+			zb.sw00 = zb.sw01 = 0; zb.sw100 = 0;
+			zb.service = service_at >= 0 && f >= service_at && f < service_at + 3;
+			if (coin_at >= 0 && f >= coin_at && f < coin_at + 3) zb.insert_coin(0);
+			if (start_at >= 0 && f >= start_at && f < start_at + 10) zb.sw100 |= 0x04;
+			for (auto &e : inps) if (f >= e.f0 && f <= e.f1) { zb.sw00 |= (uint8_t)(e.bits & 0xff); zb.sw100 |= (uint8_t)(e.bits >> 8); }
+			for (auto &c : cmds) if (!c.done && (double)f / 60.0 >= c.t) { zb.play_test(c.cmd); c.done = true; }   /* --cmd T:N plays test sound N */
+			zb.run_frame();
+			all.insert(all.end(), zb.audio.begin(), zb.audio.end());
+			if (shot_every > 0 && !shot_path.empty() && f % shot_every == 0) {
+				make_view(zb.fb, rotation, view, w, h);
+				char n[512]; snprintf(n, sizeof n, "%s-%d.bmp", shot_path.c_str(), f);
+				write_bmp(n, view.data(), w, h);
+			}
+		}
+		if (!shot_path.empty()) { make_view(zb.fb, rotation, view, w, h); write_bmp(shot_path.c_str(), view.data(), w, h); }
+		if (!wav_path.empty()) write_wav(wav_path.c_str(), all);
+		fprintf(stderr, "ran %d frames\n", frames_to_run);
+		return 0;
+	}
 	if (headless) {
 		m.watch = watch_cli; bool crash_seen = false;
 		std::vector<int16_t> all;
@@ -2073,6 +2159,7 @@ int main(int argc, char **argv)
 	rotation = st.rotate;
 	int last_treble = -1;
 	auto apply_audio = [&]() {
+		if (zax) { zb.volume = st.vol_master / 100.0f * st.vol_fx / 100.0f; return; }
 		m.volume = st.vol_master / 100.0f;
 		m.vol_psg = st.vol_psg / 100.0; m.vol_perc = st.vol_perc / 100.0; m.vol_gor = st.vol_gor / 100.0; m.vol_bass = st.vol_bass / 100.0; m.bass_soft = st.bass_soft != 0;
 		if (st.treble != last_treble) { m.set_treble(st.treble); last_treble = st.treble; }
@@ -2081,7 +2168,7 @@ int main(int argc, char **argv)
 
 	int vw = rotation ? SCR_H : SCR_W, vh = rotation ? SCR_W : SCR_H;
 	SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, "1");            /* let the window take the focus even when started from a terminal */
-	SDL_Window *win = SDL_CreateWindow(sound_only ? "Congo Bongo - sound test" : "Congo Bongo", vw * (scale > 0 ? scale : 3), vh * (scale > 0 ? scale : 3),
+	SDL_Window *win = SDL_CreateWindow(sound_only ? "Congo Bongo - sound test" : game_name, vw * (scale > 0 ? scale : 3), vh * (scale > 0 ? scale : 3),
 	                                   SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | (st.fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
 	SDL_Renderer *ren = win ? SDL_CreateRenderer(win, nullptr) : nullptr;
 	if (!win || !ren) { fprintf(stderr, "window/renderer: %s\n", SDL_GetError()); return 1; }
@@ -2167,7 +2254,7 @@ int main(int argc, char **argv)
 	bool view_dirty = true;
 	if (sound_only) { m.ppi.latch = 0x30; }   /* the sound program waits for 0x30 before it un-mutes */
 
-	auto refresh_view = [&]() { make_view(m.fb, rotation, view, vw_px, vh_px); view_dirty = true; };
+	auto refresh_view = [&]() { make_view(game_fb(), rotation, view, vw_px, vh_px); view_dirty = true; };
 	refresh_view();
 
 	auto set_title = [&]() {
@@ -2178,17 +2265,18 @@ int main(int argc, char **argv)
 	};
 	set_title();
 
+	auto put_audio = [&]() { if (as) { auto &a = game_audio(); SDL_PutAudioStreamData(as, a.data(), (int)(a.size() * sizeof(int16_t))); } };
 	if (as) {
-		m.sw00 = m.sw01 = 0; m.sw100 = 0;
-		for (int i = 0; i < 3; i++) { m.run_frame(); SDL_PutAudioStreamData(as, m.audio.data(), (int)(m.audio.size() * sizeof(int16_t))); }
+		m.sw00 = m.sw01 = 0; m.sw100 = 0; zb.sw00 = zb.sw01 = 0; zb.sw100 = 0;
+		for (int i = 0; i < 3; i++) { run_game_frame(); put_audio(); }
 		SDL_ResumeAudioStreamDevice(as);
 	}
 
 	/* ---------------- options menu ---------------- */
 	enum { PG_MAIN, PG_VIDEO, PG_AUDIO, PG_CONTROLS, PG_CHEATS, PG_FIND, PG_RESULTS, PG_CRT };
 	std::vector<Cheat> cheats;
-	/* built-in cheats: the addresses are from the MAME cheat collection (mamecheat.co.uk, congo.xml) */
-	{
+	/* built-in cheats: the addresses are from the MAME cheat collection (mamecheat.co.uk, congo.xml); Congo Bongo only */
+	if (!zax) {
 		struct B { const char *name; uint16_t addr; uint8_t val; const char *desc; };
 		static const B builtin[] = {
 			{ "INFINITE CREDITS", 0x8012, 0x99, "CREDIT COUNTER STAYS AT 99" },
@@ -2213,7 +2301,7 @@ int main(int argc, char **argv)
 		for (int i = 0; i < 7; i++) wow.pk.push_back({ (uint16_t)(0x1E45 + i), NOFALL[i] });
 		if (known_rom) cheats.push_back(wow);
 	}
-	cheats_load(cheats);
+	if (!zax) cheats_load(cheats);
 	/* RAM finder (like MAME's cheat search) over the 4 KB of main RAM */
 	std::vector<uint8_t> snap(0x1000);
 	std::vector<uint16_t> cand;
@@ -2221,6 +2309,7 @@ int main(int argc, char **argv)
 	int find_val = 0, lock_val = 0;
 	char find_msg[40] = "";
 	auto rebuild_pokes = [&]() {
+		if (zax) return;
 		m.pokes = cli_pokes;
 		for (auto &c : cheats) if (c.on) m.pokes.insert(m.pokes.end(), c.pk.begin(), c.pk.end());
 		m.sync_locks();
@@ -2234,6 +2323,7 @@ int main(int argc, char **argv)
 	};
 	const int N_TEST = (int)(sizeof TEST_CMDS / sizeof TEST_CMDS[0]);
 	bool menu = false;
+	int svc_pulse = 0;            /* Zaxxon: frames left of a menu-triggered service-switch press */
 	int page = PG_MAIN, sel = 0, test_idx = 0;
 	char cheat_msg[40] = "";
 	int test_stage = 0;           /* 0 idle, >0 frames until the test command is sent after a stop */
@@ -2245,7 +2335,7 @@ int main(int argc, char **argv)
 		case PG_MAIN: return 7;
 		case PG_VIDEO: return 9;
 		case PG_CRT: return 9;
-		case PG_AUDIO: return 9;
+		case PG_AUDIO: return zax ? 4 : 9;
 		case PG_CHEATS: return (int)cheats.size() + 4;
 		case PG_FIND: return 9;
 		case PG_RESULTS: return std::max(1, std::min((int)cand.size(), 999));
@@ -2257,13 +2347,13 @@ int main(int argc, char **argv)
 	};
 	auto close_menu = [&]() {
 		menu = false; settings_save(st);
-		if (page == PG_AUDIO) m.ppi.latch = 0x30;       /* idle command: stops a test sound (0xFF would mute the board for good) */
+		if (page == PG_AUDIO) { if (zax) zb.stop_test(); else m.ppi.latch = 0x30; }       /* idle command: stops a test sound (0xFF would mute the board for good) */
 		if (as) SDL_ClearAudioStream(as);
 	};
 	auto set_fullscreen = [&](int on) { st.fullscreen = on; SDL_SetWindowFullscreen(win, on != 0); if (!on) { SDL_SyncWindow(win); apply_window_size(); } };
 	auto set_rotate = [&](int on) { st.rotate = on; rotation = on; apply_view(); refresh_view(); apply_window_size(); };
 	auto change_page = [&](int p, int newsel = 0) {
-		if (page == PG_AUDIO && p != PG_AUDIO) m.ppi.latch = 0x30;
+		if (page == PG_AUDIO && p != PG_AUDIO) { if (zax) zb.stop_test(); else m.ppi.latch = 0x30; }
 		page = p; sel = newsel; cheat_msg[0] = 0;
 	};
 	auto menu_back = [&]() {      /* one level up, with the entry we came from highlighted */
@@ -2300,8 +2390,8 @@ int main(int argc, char **argv)
 			case 1: change_page(PG_VIDEO); break;
 			case 2: change_page(PG_AUDIO); break;
 			case 3: change_page(PG_CONTROLS); break;
-			case 4: change_page(PG_CHEATS); break;
-			case 5: m.reset(); refresh_view(); close_menu(); break;
+			case 4: if (zax) { svc_pulse = 4; close_menu(); } else change_page(PG_CHEATS); break;
+			case 5: game_reset(); refresh_view(); close_menu(); break;
 			case 6: running = false; break;
 			}
 		} else if (page == PG_VIDEO) {
@@ -2334,6 +2424,16 @@ int main(int argc, char **argv)
 			case 6: adj(&CrtParams::vig, 0, 100); break;
 			case 7: adj(&CrtParams::bright, 50, 150); break;
 			case 8: if (act) change_page(PG_VIDEO); break;
+			}
+		} else if (page == PG_AUDIO && zax) {
+			switch (sel) {
+			case 0: vol(st.vol_master); break;
+			case 1: vol(st.vol_fx); break;
+			case 2:
+				if (d) test_idx = (test_idx + zx::N_TEST_SOUNDS + d) % zx::N_TEST_SOUNDS;
+				else { zb.stop_test(); zb.play_test(test_idx); }
+				break;
+			case 3: if (act) change_page(PG_MAIN, 2); break;
 			}
 		} else if (page == PG_AUDIO) {
 			switch (sel) {
@@ -2455,7 +2555,7 @@ int main(int argc, char **argv)
 		SDL_SetRenderDrawColor(ren, 0, 0, 0, 205);
 		SDL_RenderFillRect(ren, nullptr);
 		SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
-		static const char *TITLES[] = { "CONGO BONGO", "VIDEO", "AUDIO", "CONTROLS", "CHEATS", "RAM FINDER", "RESULTS", "CRT TUNING" };
+		const char *TITLES[] = { zax ? "ZAXXON" : "CONGO BONGO", "VIDEO", "AUDIO", "CONTROLS", "CHEATS", "RAM FINDER", "RESULTS", "CRT TUNING" };
 		const float W = (float)vw, H = (float)vh;
 		const char *title = TITLES[page];
 		float top = 10;                                   /* first free line below the header */
@@ -2465,7 +2565,7 @@ int main(int argc, char **argv)
 			if (SDL_GetRenderLogicalPresentationRect(ren, &pr) && pr.w > 0) sc = pr.w / W;
 			const int want = std::max(64, std::min(2400, (int)std::lround(lwl * sc)));
 			if (want != logo_px || !logo_tex) {
-				std::vector<uint32_t> lp; logo_render(want, lp, logo_w, logo_h);
+				std::vector<uint32_t> lp; logo_render(zax ? LOGO_ZAXXON : LOGO_CONGO, want, lp, logo_w, logo_h);
 				if (logo_tex) SDL_DestroyTexture(logo_tex);
 				logo_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, logo_w, logo_h);
 				if (logo_tex) {
@@ -2487,9 +2587,9 @@ int main(int argc, char **argv)
 
 		char buf[96]; const char *desc = "";
 		if (page == PG_MAIN) {
-			static const char *items[] = { "PLAY", "VIDEO", "AUDIO", "CONTROLS", "CHEATS", "RESET GAME", "QUIT" };
-			static const char *descs[] = { "CLOSE THE MENU", "WINDOW, SCALING AND CRT", "SET THE VOLUMES", "KEYS AND JOYSTICK",
-			                               "CHEATS AND RAM FINDER", "START THE GAME OVER", "EXIT THE EMULATOR" };
+			const char *items[] = { "PLAY", "VIDEO", "AUDIO", "CONTROLS", zax ? "SELF TEST" : "CHEATS", "RESET GAME", "QUIT" };
+			const char *descs[] = { "CLOSE THE MENU", "WINDOW, SCALING AND CRT", "SET THE VOLUMES", "KEYS AND JOYSTICK",
+			                        zax ? "FIRE NEXT, RESET EXITS" : "CHEATS AND RAM FINDER", "START THE GAME OVER", "EXIT THE EMULATOR" };
 			float step = std::min(16.0f, (H - top - 44) / 7.0f), y0 = top;
 			for (int i = 0; i < 7; i++) {
 				bool on = i == sel;
@@ -2500,7 +2600,7 @@ int main(int argc, char **argv)
 		} else if (page == PG_VIDEO || page == PG_AUDIO) {
 			struct Row { const char *label; char val[24]; };
 			Row rows[9]; const char *descs[9];
-			const int nrows = 9;
+			const int nrows = (page == PG_AUDIO && zax) ? 4 : 9;
 			auto setv = [&](int i, const char *l, const char *v, const char *d) {
 				rows[i].label = l; snprintf(rows[i].val, sizeof rows[i].val, "%s", v); descs[i] = d; };
 			if (page == PG_VIDEO) {
@@ -2515,6 +2615,12 @@ int main(int argc, char **argv)
 				setv(6, "ROTATE VIEW", st.rotate ? "ON" : "OFF", "ON = TALL LIKE THE ARCADE");
 				setv(7, "SHOW FPS", st.show_fps ? "ON" : "OFF", "FRAME RATE COUNTER");
 				setv(8, "BACK", "", "");
+			} else if (zax) {
+				char t[24];
+				snprintf(t, sizeof t, "%d%%", st.vol_master); setv(0, "MASTER VOLUME", t, "OVERALL LEVEL");
+				snprintf(t, sizeof t, "%d%%", st.vol_fx);     setv(1, "SOUND EFFECTS", t, "THE DISCRETE SOUND CIRCUITS");
+				setv(2, "TEST SOUND", zx::TEST_SOUNDS[test_idx % zx::N_TEST_SOUNDS].name, "<> PICK  ENTER PLAYS");
+				setv(3, "BACK", "", "");
 			} else {
 				char t[24];
 				snprintf(t, sizeof t, "%d%%", st.vol_master); setv(0, "MASTER VOLUME", t, "OVERALL LEVEL");
@@ -2590,6 +2696,12 @@ int main(int argc, char **argv)
 			if (find_msg[0] && page != PG_CHEATS) desc = find_msg;
 			snprintf(buf, sizeof buf, "%s", desc); desc = buf;
 		} else if (page == PG_CONTROLS) {
+			static const char *zkeys[][2] = { { "ARROWS", "STICK" }, { "Z/CTRL/SPC", "FIRE" }, { "5", "COIN" }, { "1 / 2", "START" },
+				{ "I", "SWAP UP/DOWN" }, { "F2", "SERVICE" }, { "ESC", "MENU ON/OFF" }, { "P", "PAUSE" }, { "R", "ROTATE" },
+				{ "F3", "RESET" }, { "F11", "FULLSCREEN" }, { "+ / -", "VOLUME" } };
+			static const char *zpad[][2] = { { "D-PAD/STICK", "STICK" }, { "A / B / X", "FIRE" }, { "BACK", "COIN" }, { "START", "1 PLAYER" },
+				{ "R BUMPER", "2 PLAYERS" }, { "Y / GUIDE", "MENU ON/OFF" }, { "IN MENU:", "" }, { "D-PAD/STICK", "MOVE, CHANGE" },
+				{ "A", "SELECT" }, { "B / BACK", "BACK" }, { "START", "CLOSE MENU" } };
 			static const char *keys[][2] = { { "ARROWS", "MOVE" }, { "Z/CTRL/SPC", "JUMP" }, { "5", "COIN" }, { "1 / 2", "START" },
 				{ "ESC", "MENU ON/OFF" }, { "BACKSPACE", "MENU BACK" }, { "P", "PAUSE" }, { "R", "ROTATE" }, { "F3", "RESET" },
 				{ "F11", "FULLSCREEN" }, { "F12", "SCREENSHOT" }, { "+ / -", "VOLUME" } };
@@ -2602,7 +2714,7 @@ int main(int argc, char **argv)
 			const float st0 = std::min(12.0f, (H - top - 56) / (float)nk);
 			for (int i = 0; i < nk; i++) {
 				float y = top + 12 + i * st0;
-				const char **kv = gp ? pad[i] : keys[i];
+				const char **kv = zax ? (gp ? zpad[i] : zkeys[i]) : (gp ? pad[i] : keys[i]);
 				text(8, y, 1, 222, 222, 255, kv[0]);
 				text(108, y, 1, 255, 255, 0, kv[1]);
 			}
@@ -2699,14 +2811,15 @@ int main(int argc, char **argv)
 				case SDLK_ESCAPE: if (sound_only) running = false; else open_menu(); break;
 				case SDLK_P: paused = !paused; break;
 				case SDLK_R: set_rotate(!st.rotate); break;
-				case SDLK_F3: m.reset(); break;
-				case SDLK_F5: if (!sound_only) m.request_skip(1); break;
-				case SDLK_F4: if (!sound_only) m.request_skip(-1); break;
+				case SDLK_F3: game_reset(); break;
+				case SDLK_I: if (zax) st.zax_invert ^= 1; break;
+				case SDLK_F5: if (!sound_only && !zax) m.request_skip(1); break;
+				case SDLK_F4: if (!sound_only && !zax) m.request_skip(-1); break;
 				case SDLK_F11: set_fullscreen(!st.fullscreen); settings_save(st); break;
 				case SDLK_F12: {
 					std::vector<uint32_t> v; int w, h;
-					make_view(m.fb, rotation, v, w, h);
-					char n[64]; snprintf(n, sizeof n, "congobongo-%03d.bmp", shot_n++);
+					make_view(game_fb(), rotation, v, w, h);
+					char n[64]; snprintf(n, sizeof n, "%s-%03d.bmp", zax ? "zaxxon" : "congobongo", shot_n++);
 					write_bmp(n, v.data(), w, h);
 					fprintf(stderr, "saved %s\n", n);
 					break; }
@@ -2751,7 +2864,10 @@ int main(int argc, char **argv)
 					pad_next_ms = now + (pad_held ? 90 : 350); pad_held = 1;
 				}
 			}
-			if (page == PG_AUDIO) {
+			if (page == PG_AUDIO && zax) {
+				zb.sound_only = true; zb.run_frame(); zb.sound_only = false;     /* game frozen, sound circuits running */
+				put_audio();
+			} else if (page == PG_AUDIO) {
 				/* the sound board keeps running (game frozen) so the TEST SOUND item and level changes are audible */
 				if (test_stage > 0 && --test_stage == 0) m.ppi.latch = (uint8_t)TEST_CMDS[test_idx];
 				bool so = m.sound_only; m.sound_only = true;
@@ -2766,17 +2882,19 @@ int main(int argc, char **argv)
 
 		const bool *k = SDL_GetKeyboardState(nullptr);
 		uint8_t s0 = 0, s100 = 0;
+		/* Congo: 04 = up, 08 = down.  Zaxxon wires them the other way round (08 = up) */
+		const uint8_t UPB = zax ? (st.zax_invert ? 0x04 : 0x08) : 0x04, DNB = zax ? (st.zax_invert ? 0x08 : 0x04) : 0x08;
 		if (k[SDL_SCANCODE_RIGHT]) s0 |= 0x01;
 		if (k[SDL_SCANCODE_LEFT])  s0 |= 0x02;
-		if (k[SDL_SCANCODE_UP])    s0 |= 0x04;
-		if (k[SDL_SCANCODE_DOWN])  s0 |= 0x08;
+		if (k[SDL_SCANCODE_UP])    s0 |= UPB;
+		if (k[SDL_SCANCODE_DOWN])  s0 |= DNB;
 		if (k[SDL_SCANCODE_Z] || k[SDL_SCANCODE_LCTRL] || k[SDL_SCANCODE_SPACE]) s0 |= 0x10;
 		if (k[SDL_SCANCODE_1]) s100 |= 0x04;
 		if (k[SDL_SCANCODE_2]) s100 |= 0x08;
 		bool coin = k[SDL_SCANCODE_5];
 		{
 			int dx, dy; pad_dir(dx, dy);
-			if (dx > 0) s0 |= 0x01; if (dx < 0) s0 |= 0x02; if (dy < 0) s0 |= 0x04; if (dy > 0) s0 |= 0x08;
+			if (dx > 0) s0 |= 0x01; if (dx < 0) s0 |= 0x02; if (dy < 0) s0 |= UPB; if (dy > 0) s0 |= DNB;
 			for (SDL_Gamepad *g : pads) {
 				if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_SOUTH) || SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_EAST) || SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_WEST)) s0 |= 0x10;
 				if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_START)) s100 |= 0x04;
@@ -2784,23 +2902,31 @@ int main(int argc, char **argv)
 				if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_BACK) || SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) coin = true;
 			}
 		}
-		if (coin && !prev_coin && (m.l0 & 1)) m.coin_status[0] = 1;
-		prev_coin = coin;
-		if (!sound_only) { m.sw00 = s0; m.sw01 = 0; m.sw100 = s100; }
-
-		m.run_frame();
-		if (as) SDL_PutAudioStreamData(as, m.audio.data(), (int)(m.audio.size() * sizeof(int16_t)));
+		if (zax) {
+			if (coin && !prev_coin) zb.insert_coin(0);
+			prev_coin = coin;
+			zb.sw00 = s0; zb.sw01 = 0; zb.sw100 = s100;
+			zb.service = k[SDL_SCANCODE_F2] || svc_pulse > 0;      /* the service switch pulses NMI (self test) */
+			if (svc_pulse > 0) svc_pulse--;
+		} else {
+			if (coin && !prev_coin && (m.l0 & 1)) m.coin_status[0] = 1;
+			prev_coin = coin;
+			if (!sound_only) { m.sw00 = s0; m.sw01 = 0; m.sw100 = s100; }
+		}
+		
+		run_game_frame();
+		put_audio();
 		/* if the display (vsync) held us up and the audio queue ran low, emulate extra frames so the sound never starves */
 		for (int extra = 0; extra < 3 && as && SDL_GetAudioStreamQueued(as) < Q_LOW; extra++) {
-			m.run_frame();
-			SDL_PutAudioStreamData(as, m.audio.data(), (int)(m.audio.size() * sizeof(int16_t)));
+			run_game_frame();
+			put_audio();
 		}
 
 		refresh_view();
 		draw_frame(false);
 	}
 
-	if (dev_stats) fprintf(stderr, "emulated %ld frames in %.2f s (%.1f fps)\n", m.frames, SDL_GetTicks() / 1000.0, m.frames * 1000.0 / std::max<Uint64>(1, SDL_GetTicks()));
+	if (dev_stats) fprintf(stderr, "emulated %ld frames in %.2f s (%.1f fps)\n", (long)(zax ? zb.frames : m.frames), SDL_GetTicks() / 1000.0, (zax ? zb.frames : m.frames) * 1000.0 / std::max<Uint64>(1, SDL_GetTicks()));
 	settings_save(st);
 	for (SDL_Gamepad *g : pads) SDL_CloseGamepad(g);
 	if (as) SDL_DestroyAudioStream(as);

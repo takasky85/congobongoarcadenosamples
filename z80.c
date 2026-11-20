@@ -29,7 +29,7 @@ void z80_reset(Z80 *z)
     z->af2.w = z->bc2.w = z->de2.w = z->hl2.w = 0xffff;
     z->ix.w = z->iy.w = 0xffff; z->sp.w = 0xffff; z->pc.w = 0;
     z->i = z->r = 0; z->iff1 = z->iff2 = 0; z->im = 0;
-    z->halted = 0; z->ei_delay = 0; z->irq = 0; z->cycles = 0;
+    z->halted = 0; z->ei_delay = 0; z->irq = 0; z->nmi = 0; z->cycles = 0;
 }
 
 static inline uint8_t rd8(Z80 *z, uint16_t a) { return z->rd(z->ud, a); }
@@ -37,6 +37,7 @@ static inline void wr8(Z80 *z, uint16_t a, uint8_t v) { z->wr(z->ud, a, v); }
 static inline uint16_t rd16(Z80 *z, uint16_t a) { return rd8(z, a) | (rd8(z, a + 1) << 8); }
 static inline void wr16(Z80 *z, uint16_t a, uint16_t v) { wr8(z, a, v & 255); wr8(z, a + 1, v >> 8); }
 static inline uint8_t fetch8(Z80 *z) { return rd8(z, z->pc.w++); }
+static inline uint8_t fetchm1(Z80 *z) { uint16_t a = z->pc.w++; return z->rdm1 ? z->rdm1(z->ud, a) : rd8(z, a); }
 static inline uint16_t fetch16(Z80 *z) { uint16_t v = rd16(z, z->pc.w); z->pc.w += 2; return v; }
 static inline void push(Z80 *z, uint16_t v) { z->sp.w -= 2; wr16(z, z->sp.w, v); }
 static inline uint16_t pop(Z80 *z) { uint16_t v = rd16(z, z->sp.w); z->sp.w += 2; return v; }
@@ -180,7 +181,7 @@ static int do_cb(Z80 *z, int pfx)
 {
     uint16_t addr = 0; int8_t d = 0; int cyc;
     if (pfx) d = (int8_t)fetch8(z);
-    uint8_t op = fetch8(z);
+    uint8_t op = pfx ? fetch8(z) : fetchm1(z);
     int x = op >> 6, y = (op >> 3) & 7, zz = op & 7;
     uint8_t v;
     int mem = (zz == 6) || pfx;
@@ -203,7 +204,7 @@ static int do_cb(Z80 *z, int pfx)
 /* -------------------------------------------------------------- ED group */
 static int do_ed(Z80 *z)
 {
-    uint8_t op = fetch8(z);
+    uint8_t op = fetchm1(z);
     int x = op >> 6, y = (op >> 3) & 7, zz = op & 7, p = y >> 1, q = y & 1;
     if (x == 1) {
         switch (zz) {
@@ -268,6 +269,13 @@ int z80_step(Z80 *z)
 {
     int cyc = 0;
 
+    if (z->nmi) {                /* NMI: not maskable, IFF1 is saved in IFF2 and cleared */
+        z->nmi = 0; z->halted = 0; z->iff2 = z->iff1; z->iff1 = 0; z->ei_delay = 0;
+        push(z, z->pc.w);
+        z->pc.w = 0x66;
+        z->cycles += 11; z->r++;
+        return 11;
+    }
     if (z->irq && z->iff1 && !z->ei_delay) {
         z->irq = 0; z->halted = 0; z->iff1 = z->iff2 = 0;
         push(z, z->pc.w);
@@ -282,7 +290,7 @@ int z80_step(Z80 *z)
     int pfx = 0;
     uint8_t op;
     for (;;) {
-        op = fetch8(z); z->r++; cyc += 4;
+        op = fetchm1(z); z->r++; cyc += 4;
         if (op == 0xdd) { pfx = 1; continue; }
         if (op == 0xfd) { pfx = 2; continue; }
         break;

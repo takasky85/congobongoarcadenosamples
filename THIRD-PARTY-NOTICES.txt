@@ -4,7 +4,8 @@ THIRD-PARTY NOTICES
 1. MAME  (hardware, memory map, ROM definitions, SN76496 and MM5837 behaviour)
 ------------------------------------------------------------------------------
 Behaviour and data tables in congobongo.cpp and the synth headers follow the MAME source
-(zaxxon.cpp, sn76496.cpp, mm5837.cpp).  The code here is a re-implementation.
+(zaxxon.cpp, sn76496.cpp, mm5837.cpp).  The code here is a re-implementation.  zaxxon_hw.h follows zaxxon.cpp for the
+Zaxxon board (memory map, latches, video, palette, inputs, ROM names and CRCs).
 
 BSD 3-Clause License
 
@@ -140,5 +141,8 @@ and to alter it and redistribute it freely, subject to the following restriction
 * Cheat addresses (congo.xml, MAME cheat collection): facts about the game's RAM layout, used as data only.
 * The menu style (yellow cursor, green help line) was inspired by the Dig Dug port by TekRantGaming
   (MIT License); no code or assets were taken from it.
-* The Congo Bongo name, game and logo are the property of their owners (Sega).  The logo is used here only
+* Zaxxon sound circuits: part values and signal paths read from the schematic in the Zaxxon manual 420-0724
+  (sheets 11 and 12), used as facts only.  The program-ROM unscrambling tables in zaxxon_hw.h were measured
+  from the ROM images themselves.
+* The Congo Bongo and Zaxxon names, games and logos are the property of their owners (Sega).  The logo is used here only
   as menu decoration.  No ROMs are included.

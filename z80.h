@@ -12,12 +12,14 @@ typedef struct Z80 {
     uint8_t i, r;
     int iff1, iff2, im, halted, ei_delay;
     int irq;                     /* HOLD_LINE style: cleared on acknowledge */
+    int nmi;                     /* non-maskable interrupt request (edge): cleared when taken; vector 0066 */
     uint64_t cycles;
     void *ud;
     uint8_t (*rd)(void *ud, uint16_t a);
     void    (*wr)(void *ud, uint16_t a, uint8_t v);
     uint8_t (*in)(void *ud, uint16_t a);
     void    (*out)(void *ud, uint16_t a, uint8_t v);
+    uint8_t (*rdm1)(void *ud, uint16_t a);   /* optional: opcode (M1) fetch, for Sega-style encrypted CPUs; NULL = use rd */
 } Z80;
 
 void z80_reset(Z80 *z);
