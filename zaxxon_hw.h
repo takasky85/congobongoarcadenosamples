@@ -368,7 +368,7 @@ struct Board {
 
 		/* 1. scrolling, skewed background */
 		if (bg_enable) {
-			const int flipoffs = flip ? 0x38 : 0x40;
+			const int flipoffs = 0x3f;                      /* 0x40 - 1 upright, 0x38 + 7 flipped: the same column either way */
 			for (int y = 16; y < 16 + SCR_H; y++) {
 				uint16_t *dst = &pen[(y - 16) * SCR_W];
 				int vf = y ^ flipmask;
