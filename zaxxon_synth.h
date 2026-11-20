@@ -17,7 +17,8 @@
 //     the noise filters, how effects overlap) are approximations.
 //
 //   PA0,PA1  altitude, 0..3: the engine sound gets louder as the ship climbs (level 0.5 + 0.157 * v)
-//   PA2      engine, mid band 450..750 Hz (loop)   PA3  engine, low band around 300 Hz (loop)
+//   PA2,PA3  engine: a 2-bit code into a 74LS139.  00 = mid band 450..750 Hz (start of a life), 01 (D low, C high) =
+//            low band around 300 Hz (flight), 10 / 11 = silent.  Loops, level set by PA0/PA1.
 //   PA4      homing missile, ~1 kHz pulse tone (loop)
 //   PA5      base missile, band-limited noise (one-shot, 0.72 s)
 //   PA6      force-field laser, falling square sweep (repeats while held)
@@ -107,7 +108,7 @@ public:
 		if (fa & 0x20) t_base = 0;
 		if (fa & 0x40) { t_las = 0; ph_las = 0; }
 		if (fb & 0x10) t_sexp = 0;
-		if ((fb & 0x20) && t_mexp < 0) t_mexp = 0;              // the large explosion is not restarted while it plays
+		if (fb & 0x20) t_mexp = 0;                              // every trigger restarts the envelope (the game re-triggers it each frame while the ship blows up)
 		if (fb & 0x80) { t_cann = 0; ph_cann = 0; }
 		if (fc & 0x01) t_shot = 0;
 		if (fc & 0x04) { t_al2 = 0; ph_al2 = 0; }
@@ -119,8 +120,12 @@ public:
 
 		// ---- engine (PA2 = mid band, PA3 = low band; loops).  PA0/PA1 = altitude: louder
 		if ((pitch_ctr++ & 63) == 0) set_pitch(false);
-		g_lo += ((pa & 0x08) ? 0.0 - g_lo : 1.0 - g_lo) * kg;
-		g_hi += ((pa & 0x04) ? 0.0 - g_hi : 1.0 - g_hi) * kg;
+		// PA2 (ship C) and PA3 (ship D) are the two address bits of a 74LS139 decoder (U32), not two separate switches:
+		// both low selects output 0 (the 500..750 Hz start-of-life noise), D low with C high selects output 1 (the flight
+		// noise around 300 Hz); C low with D high selects an output that goes nowhere.
+		const bool y0 = (pa & 0x0c) == 0x00, y1 = (pa & 0x0c) == 0x04;
+		g_hi += ((y0 ? 1.0 : 0.0) - g_hi) * kg;
+		g_lo += ((y1 ? 1.0 : 0.0) - g_lo) * kg;
 		{
 			const double v = alt_gain;
 			const double a = fly_lo.run(n), b = fly_hi.run(n);
@@ -166,7 +171,7 @@ public:
 		{
 			const double xs = sexp.run(n), xm = mexp.run(n), xh = shot.run(n);
 			if (t_sexp >= 0) { t_sexp += dt; mix += env(t_sexp, 0.3, 0.40) * xs; if (t_sexp > 2.0) t_sexp = -1; }
-			if (t_mexp >= 0) { t_mexp += dt; mix += env(t_mexp, 2.5, 1.50) * xm; if (t_mexp > 9.0) t_mexp = -1; }
+			if (t_mexp >= 0) { t_mexp += dt; mix += mexp_env(t_mexp) * xm; if (t_mexp > 3.9) t_mexp = -1; }
 			if (t_shot >= 0) { t_shot += dt; mix += env(t_shot, 0.4, 0.14) * xh; if (t_shot > 1.2) t_shot = -1; }
 		}
 
@@ -245,6 +250,18 @@ private:
 	{
 		const double a = std::min(1.0, t / 0.003);
 		return t < hold ? a : a * std::exp(-(t - hold) / tau);
+	}
+
+	// large explosion: full level for about 1.6 s, then a knee and a fall of roughly 25 dB per second (dB points, linear in between)
+	static double mexp_env(double t)
+	{
+		static const double kt[] = { 0, 1.5, 1.625, 1.875, 2.125, 2.375, 2.625, 2.875, 3.125, 3.375, 3.625, 3.9 };
+		static const double kd[] = { 0, 0, -0.3, -1.1, -2.5, -6.3, -12, -17.5, -24.4, -32, -38, -60 };
+		const int n = (int)(sizeof kt / sizeof kt[0]);
+		if (t >= kt[n - 1]) return 0.0;
+		int i = 0; while (i + 2 < n && t > kt[i + 1]) ++i;
+		const double db = kd[i] + (kd[i + 1] - kd[i]) * (t - kt[i]) / (kt[i + 1] - kt[i]);
+		return std::min(1.0, t / 0.003) * std::pow(10.0, db / 20.0);
 	}
 
 	// level of the cannon sine: the 50 ms RMS values of the recording, as straight lines in between

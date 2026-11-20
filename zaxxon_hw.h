@@ -42,7 +42,7 @@ static constexpr int N_SETS = (int)(sizeof SETS / sizeof SETS[0]);
 /* sound-circuit test entries for the options menu: drive one 8255 pin low (active) for a while */
 struct TestSound { const char *name; uint8_t a, b, c; int frames; };   /* a/b/c: port bits pulled low */
 static const TestSound TEST_SOUNDS[] = {
-	{ "ENGINE",           0x0c, 0, 0, 150 }, { "HOMING MISSILE", 0x10, 0, 0, 100 }, { "BASE MISSILE", 0x20, 0, 0, 3 },
+	{ "ENGINE (START)",   0x0c, 0, 0, 150 }, { "ENGINE (FLIGHT)",  0x08, 0, 0, 150 }, { "HOMING MISSILE", 0x10, 0, 0, 100 }, { "BASE MISSILE", 0x20, 0, 0, 3 },
 	{ "LASER",            0x40, 0, 0, 3 },   { "BATTLESHIP",     0x80, 0, 0, 100 }, { "SMALL EXPLOSION", 0, 0x10, 0, 3 },
 	{ "LARGE EXPLOSION",  0, 0x20, 0, 3 },   { "CANNON",         0, 0x80, 0, 3 },   { "ENEMY SHOT", 0, 0, 0x01, 3 },
 	{ "TARGET ALARM",     0, 0, 0x04, 3 },   { "FUEL ALARM",     0, 0, 0x08, 3 },

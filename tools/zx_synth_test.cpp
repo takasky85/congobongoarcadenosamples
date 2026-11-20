@@ -13,7 +13,7 @@ int main(int argc, char **argv)
 {
 	const char *outdir = argc > 1 ? argv[1] : nullptr; int idx = 0;
 	struct T { const char *name; int port; uint8_t mask; double hold, total; } tests[] = {
-		{ "engine mid (PA2)", 0, 0x04, 2.0, 3.0 }, { "engine lo (PA3)", 0, 0x08, 2.0, 3.0 },
+		{ "engine start-of-life (PA2+PA3 low)", 0, 0x0c, 2.0, 3.0 }, { "engine flight (PA3 low)", 0, 0x08, 2.0, 3.0 },
 		{ "homing missile PA4", 0, 0x10, 0.4, 0.9 }, { "base missile PA5", 0, 0x20, 0.02, 1.0 }, { "laser PA6", 0, 0x40, 0.6, 1.0 },
 		{ "battleship PA7", 0, 0x80, 0.4, 0.9 }, { "S-EXP PB4", 1, 0x10, 0.02, 2.0 }, { "M-EXP PB5", 1, 0x20, 0.02, 5.0 },
 		{ "cannon PB7", 1, 0x80, 0.02, 2.0 }, { "shot PC0", 2, 0x01, 0.02, 1.0 }, { "alarm2 PC2", 2, 0x04, 0.02, 0.6 }, { "alarm3 PC3", 2, 0x08, 0.02, 0.6 } };
