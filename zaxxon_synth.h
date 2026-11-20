@@ -68,7 +68,7 @@ public:
 	void reset(double r)
 	{
 		rate = r; dt = 1.0 / r;
-		pa = pb = pc = pa_prev = pb_prev = pc_prev = 0xff;
+		pa = pb = pc = pa_prev = pb_prev = pc_prev = 0xff; ea = eb = ec = 0;
 		ctr = 0; pitch_ctr = 0;
 
 		// noise colours (measured on the recordings); target = RMS of the effect while it is at full level
@@ -88,15 +88,22 @@ public:
 		set_pitch(true);
 	}
 
-	void ports(uint8_t a, uint8_t b, uint8_t c) { pa = a; pb = b; pc = c; }
+	// Called on every write to the 8255.  Falling edges are latched here, not looked for in tick(): the game drives some
+	// pins (the coin blips, for one) low for only a few microseconds, far less than one output sample, so sampling the
+	// pin levels once per sample would miss most of those pulses.
+	void ports(uint8_t a, uint8_t b, uint8_t c)
+	{
+		if (ctr >= (unsigned)(rate * 0.1)) { ea |= (uint8_t)(pa_prev & ~a); eb |= (uint8_t)(pb_prev & ~b); ec |= (uint8_t)(pc_prev & ~c); }
+		pa_prev = a; pb_prev = b; pc_prev = c;
+		pa = a; pb = b; pc = c;
+	}
 
 	double tick()
 	{
 		// Falling edges start one-shots.  The 8255 mode-set at power-on drives every pin low for a few microseconds,
 		// which would fire all of them at once; that boot-time blip is ignored for the first 100 ms.
-		const bool settle = ctr < (unsigned)(rate * 0.1);
-		const uint8_t fa = settle ? 0 : (pa_prev & ~pa), fb = settle ? 0 : (pb_prev & ~pb), fc = settle ? 0 : (pc_prev & ~pc);
-		pa_prev = pa; pb_prev = pb; pc_prev = pc;
+		const uint8_t fa = ea, fb = eb, fc = ec;
+		ea = eb = ec = 0;
 		if (fa & 0x20) t_base = 0;
 		if (fa & 0x40) { t_las = 0; ph_las = 0; }
 		if (fb & 0x10) t_sexp = 0;
@@ -188,7 +195,7 @@ private:
 	static constexpr double FCLK = 103200.0;
 	double dt = 1.0 / 48000;
 	uint32_t lfsr = 0x1ffff; double bit_left = 1.0 / FCLK; int gate = 0;
-	uint8_t pa = 0xff, pb = 0xff, pc = 0xff, pa_prev = 0xff, pb_prev = 0xff, pc_prev = 0xff;
+	uint8_t pa = 0xff, pb = 0xff, pc = 0xff, pa_prev = 0xff, pb_prev = 0xff, pc_prev = 0xff, ea = 0, eb = 0, ec = 0;
 	Chain fly_lo, fly_hi, base, sexp, mexp, shot, jit;
 	double g_lo = 0, g_hi = 0, g_hom = 0, g_las = 0, g_bs = 0;
 	double ph_hom = 0, ph_las = 0, ph_bs = 0, ph_cann = 0, ph_al2 = 0, ph_al3 = 0, t_las = 0;
