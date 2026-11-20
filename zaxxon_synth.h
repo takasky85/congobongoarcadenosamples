@@ -14,10 +14,10 @@
 //     paths, the shape of the noise spectra and the decay times.  Only those measured numbers are used here;
 //     none of the recordings, or anything derived sample-by-sample from them, is included.
 //   * The effect circuits are not simulated, so details that depend on the analogue parts (the exact shape of
-//     the noise filters, how the engine pitch follows the altitude bits, how effects overlap) are approximations.
+//     the noise filters, how effects overlap) are approximations.
 //
-//   PA0,PA1  altitude, 0..3: the engine sound gets louder and a little higher as the ship climbs
-//   PA2      engine, low band (loop)            PA3  engine, mid band (loop)
+//   PA0,PA1  altitude, 0..3: the engine sound gets louder as the ship climbs (level 0.5 + 0.157 * v)
+//   PA2      engine, mid band 450..750 Hz (loop)   PA3  engine, low band around 300 Hz (loop)
 //   PA4      homing missile, ~1 kHz pulse tone (loop)
 //   PA5      base missile, band-limited noise (one-shot, 0.72 s)
 //   PA6      force-field laser, falling square sweep (repeats while held)
@@ -72,8 +72,8 @@ public:
 		ctr = 0; pitch_ctr = 0;
 
 		// noise colours (measured on the recordings); target = RMS of the effect while it is at full level
-		mk(fly_lo,   .62, 1, 300, 1.3, 2, 120, .707, 0, 650, .707);   // engine, low band: noise around 300 Hz
-		mk(fly_hi,   .71, 2, 430, .9, 0, 750, .707);             // engine, mid band: 450..750 Hz
+		mk(fly_lo,   .62, 1, 300, 1.3, 2, 120, .707, 0, 650, .707);   // engine, low band (PA3): noise around 300 Hz
+		mk(fly_hi,   .71, 2, 430, .9, 0, 750, .707);             // engine, mid band (PA2): 450..750 Hz
 		mk(base,     .62, 1, 300, 1.3, 2, 120, .707, 0, 650, .707);   // base missile: same band as the low engine
 		mk(sexp,     .60, 0, 270, .707, 2, 80, .707);            // small explosion: 2-pole low-pass 270 Hz
 		mk(mexp,     .83, 0, 190, .707, 2, 45, .707);            // large explosion: 2-pole low-pass 190 Hz
@@ -117,10 +117,10 @@ public:
 		double mix = 0;
 		const double kg = 1 - std::exp(-dt / 0.003);       // 3 ms: no clicks when a loop starts or stops
 
-		// ---- engine (PA2, PA3 loops).  PA0/PA1 = altitude: louder and a little higher
+		// ---- engine (PA2 = mid band, PA3 = low band; loops).  PA0/PA1 = altitude: louder
 		if ((pitch_ctr++ & 63) == 0) set_pitch(false);
-		g_lo += ((pa & 0x04) ? 0.0 - g_lo : 1.0 - g_lo) * kg;
-		g_hi += ((pa & 0x08) ? 0.0 - g_hi : 1.0 - g_hi) * kg;
+		g_lo += ((pa & 0x08) ? 0.0 - g_lo : 1.0 - g_lo) * kg;
+		g_hi += ((pa & 0x04) ? 0.0 - g_hi : 1.0 - g_hi) * kg;
 		{
 			const double v = alt_gain;
 			const double a = fly_lo.run(n), b = fly_hi.run(n);
@@ -228,16 +228,15 @@ private:
 		lfsr = sl; bit_left = sb; gate = sg;
 	}
 
-	// engine: altitude 0..3 from PA0/PA1 -> level 0.5 .. 0.97 and a rise of up to 40 % in pitch
+	// engine: altitude 0..3 from PA0/PA1 -> level 0.5 .. 0.97 (the two bits only change the loudness of both engine loops)
 	void set_pitch(bool force)
 	{
 		const int v = pa & 3;
 		if (!force && v == alt_v) return;
 		alt_v = v;
 		alt_gain = 0.5 + 0.157 * v;
-		const double p = 1.0 + 0.13 * v, comp = 1.0 / std::sqrt(p);   // same loudness when the band moves
-		fly_lo.setup(rate, p); fly_hi.setup(rate, p);
-		fly_lo_comp = fly_hi_comp = comp;
+		fly_lo.setup(rate); fly_hi.setup(rate);
+		fly_lo_comp = fly_hi_comp = 1.0;
 	}
 	int alt_v = -1; double fly_lo_comp = 1, fly_hi_comp = 1;
 
