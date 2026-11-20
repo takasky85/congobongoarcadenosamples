@@ -10,15 +10,15 @@ circuit models, so no audio samples are needed**.
 
 You supply your own ROMs. None are included.
 
-**Zaxxon** has no sound CPU and no samples to begin with: an 8255 switches a set of analog effect circuits (555
-timers, 74123 one-shots, op-amp filters, a noise generator, a photocell and voltage-controlled attenuators). MAME's
-driver notes list the discrete sound emulation as a known issue. Here the main board is emulated (see below) and every effect is
-**synthesized from the schematic in the manual (sheets 11 and 12)**, again without samples. Be aware that the
-Zaxxon sound is a *behavioural* model: signal paths, one-shot times and filter corners were read off the drawing and
-computed from the part values, but there was no real board or recording to compare against, and the parts without
-public data (the MB4391 attenuators, the CdS photocell) are modelled as ideal. Levels and timbre are therefore
-approximations; the header comment of `zaxxon_synth.h` lists every effect, its source on the schematic and the
-figures used, so they are easy to check and tune. Feedback from anyone who knows the real machine is very welcome.
+**Zaxxon** has no sound CPU: an 8255 switches a set of analog effect circuits (555 timers, 74123 one-shots, op-amp
+filters, a noise generator, voltage-controlled attenuators). MAME has no emulation of that board and plays
+recorded samples instead. Here the main board is emulated (see below) and every effect is **generated**, so no samples
+are needed. It is a *behavioural* model, not a simulation of the analog parts: which pin starts which effect, and
+whether it is a one-shot or a loop, follows the schematic (manual sheets 11 and 12) and MAME's driver; pitch, timbre,
+length and loudness were set by measuring recordings of the real machine (pitch of the tones, sweep paths, noise
+colours, decay times). Only those measured numbers are in the code, no recording is included. Details that depend
+on the analog parts (exact noise filter shapes, how the engine pitch follows altitude) are approximations; the
+header of `zaxxon_synth.h` lists every effect. Feedback from anyone who knows the real machine is welcome.
 
 Congo Bongo remains on the list of MAME games that still require samples. I never like that because in some versions the drums sounded really off. I fed Claude the board schematics and the arcade manual and voila, emulation of the analog sound. I think the drums are very accurate, but the gorilla sound is still kind of an approximation. Would love for someone who has played the actual real arcade game recently to try it and let me know what they think. 
 
@@ -48,19 +48,22 @@ Licenses of everything that is used or borrowed are listed under "Licenses and c
 
 ## Run
 
-Put `congo.zip` (the MAME set) and/or `zaxxon.zip` in the `roms` folder, then:
+Start the program. If it finds the ROMs of both games (or none) a window asks which game to play. There you can
+press **B** to browse to your MAME `roms` folder, or **drop that folder (or a zip) onto the window**. The folders
+you pick are remembered in `congobongo_roms.txt` next to the program, so you do not have to copy any ROMs. Only
+`congo.zip`, `tiptop.zip` and `zaxxon.zip` are opened, so a folder with thousands of MAME zips is fine.
+Dropping a folder on the game window, or the menu item **CHANGE GAME**, brings the selection window back.
+
+You can also put `congo.zip` and/or `zaxxon.zip` in a folder called `roms` next to the program and run
 
     ./congobongo
 
-or give the zip or folder explicitly: `./congobongo C:/path/to/congo.zip`.
+or give the zip or folder explicitly: `./congobongo C:/path/to/congo.zip` (`--game congo|zaxxon` skips the
+selection window, `--launcher` always shows it).
 ROMs are matched by CRC32, so renamed files are fine. The MAME `congo` (rev C)
 and `tiptop` sets are supported (`tiptop.zip` needs `congo.zip` beside it).
 
-Zaxxon: the MAME sets `zaxxon` (set 1), `zaxxon2`, `zaxxon3`, `zaxxonj` (Japan) and `zaxxonb` (bootleg) are
-supported; each zip holds everything it needs. The game is detected from the ROMs. If the ROMs of both games
-are present Congo Bongo starts; use `--game zaxxon`, or `--set zaxxonj` to choose one particular Zaxxon set.
-The Japan and bootleg program ROMs are stored scrambled; the unscrambling (see `zaxxon_hw.h`) was measured from
-the plain set 3 program rather than copied from anywhere.
+Zaxxon: the MAME set `zaxxon` (set 1, rev D) is supported; the zip holds everything it needs.
 
 ### Zaxxon controls
 
@@ -191,7 +194,7 @@ addresses as in MAME's debugger and cheat files). `--poke 8123:09` does the same
     --font MODE        menu font: auto, rom, builtin;  --dump-font FILE.bmp
     --poke ADDR:VAL    keep a RAM byte at a value (hex), like a cheat; repeatable
     --volume X         master volume 0..2 (overrides the saved setting)
-    --game NAME        congo or zaxxon, when both sets of ROMs are present;  --set NAME  one Zaxxon set
+    --game NAME        congo or zaxxon: start that game without the selection window;  --launcher  always show it
     --lives N          3, 4 or 5;  --free-play (both games)
     --bonus N          10000, 20000, 30000 or 40000
     --difficulty N     0 easy ... 3 hardest (default 1)
@@ -209,10 +212,10 @@ addresses as in MAME's debugger and cheat files). `--poke 8123:09` does the same
   background colour and enable, scroll), DIP switches, joystick and the NMI service switch. The 256x224 picture
   has the skewed-scroll isometric background built from the tile-map ROMs, 32x32 three-bit sprites, the character
   layer coloured by the colour-code PROM and the resistor-weighted palette PROM.
-* Sound: the 8255 outputs drive `zaxxon_synth.h`, one model per circuit (see above). Boot-time glitches on the
-  8255 pins are ignored for the first 100 ms.
-* Verified by running every one of the five sets headless (attract mode, coin, start, play, self test) and
-  looking at the pictures. Not emulated: cocktail mode, gamepad rumble, save states.
+* Sound: the 8255 outputs drive `zaxxon_synth.h`, one model per effect (see above). Boot-time glitches on the
+  8255 pins are ignored for the first 100 ms. Like the real board only the lower half of sprite RAM (32 sprites)
+  is drawn.
+* Verified by running the set headless (attract mode, coin, start, play, self test) and looking at the pictures. Not emulated: cocktail mode, gamepad rumble, save states.
 
 ### Congo Bongo
 
@@ -234,9 +237,10 @@ save states.
 The Z80 core passes the standard zexdoc and zexall instruction exercisers.
 For Congo Bongo the video and sound paths were tested with synthetic graphics and the real
 sound ROM, but the author did not have the game's main ROMs, so that game
-itself is untested. Zaxxon was run with the real ROMs of all five sets. The SDL window, menu and
-audio code for Zaxxon was only compiled against a stand-in SDL3 header (no SDL3 was available while it was
-written), so please report anything odd in the menus. If something looks wrong, run
+itself is untested. Zaxxon was run with the real ROMs. The game selection window, the folder browse and
+drag-and-drop code, and the SDL menu and audio code for Zaxxon were only compiled against a stand-in SDL3
+header (no SDL3 was available while they were written; the Windows build on GitHub does compile them), so please
+report anything odd. If something looks wrong, run
 
     ./congobongo --headless --frames 600 --coin-at 120 --start-at 150 --shot-every 60 --shot shot --wav test.wav
 
@@ -255,7 +259,7 @@ for this project. It borrows the following; nothing else was copied.
 | window, renderer, audio, input | **SDL3**, Copyright (C) 1997-2025 Sam Lantinga | zlib license |
 | the built-in cheats (INFINITE CREDITS/LIVES/BONUS, INVINCIBLE, WALK ON WATER) | RAM addresses from the MAME cheat collection's `congo.xml` | data only; credit to the cheat authors |
 | Zaxxon hardware behaviour, memory map, ROM names and CRCs, video, palette and input logic | MAME `zaxxon.cpp` (Nicola Salmoria and the MAME team), re-implemented, not pasted | BSD-3-Clause |
-| Zaxxon sound circuits (sheets 11 and 12) | *Zaxxon* manual 420-0724: part values, signal paths and the sound port test | data only |
+| Zaxxon sound effects | *Zaxxon* manual 420-0724 (sheets 11 and 12: which pin does what, the sound port test) and measurements of recordings of the real machine (pitch, timbre, timing); no recording is included | data only |
 | menu layout idea | the Dig Dug port by TekRantGaming (MIT); no code was taken | MIT |
 
 The Congo Bongo and Zaxxon names, games and logos belong to their owners (Sega). The logos (`congo_logo_data.h`,

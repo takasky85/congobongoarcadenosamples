@@ -276,16 +276,36 @@ static bool ends_with_nocase(const std::string &s, const char *suf)
 	return true;
 }
 
-static void add_path(const std::string &path, std::vector<RomFile> &out)
+/* Only the zips this program can use are opened when a folder holds many (a MAME "roms" folder has thousands):
+ * congo, tiptop and zaxxon.  A small folder (up to 40 zips) is read completely, so any zip name works there. */
+static bool wanted_zip_name(const std::string &stem)
+{
+	static const char *names[] = { "congo", "tiptop", "zaxxon" };
+	for (const char *n : names) if (stem.size() == strlen(n) && ends_with_nocase(stem, n)) return true;
+	return false;
+}
+
+static void add_path(const std::string &path, std::vector<RomFile> &out, int depth = 0)
 {
 	namespace fs = std::filesystem;
 	std::error_code ec;
 	if (fs::is_directory(path, ec)) {
+		int nzip = 0, nloose = 0;
 		for (auto &de : fs::directory_iterator(path, ec)) {
 			if (!de.is_regular_file(ec)) continue;
+			if (ends_with_nocase(de.path().string(), ".zip")) nzip++; else nloose++;
+		}
+		for (auto &de : fs::directory_iterator(path, ec)) {
+			if (de.is_directory(ec)) {       /* a MAME folder may hold the games as extracted folders, or a 'roms' folder */
+				const std::string nm = de.path().filename().string();
+				if (depth < 1 && (wanted_zip_name(nm) || nm == "roms" || nm == "ROMS" || nm == "Roms")) add_path(de.path().string(), out, depth + 1);
+				continue;
+			}
+			if (!de.is_regular_file(ec)) continue;
 			std::string p = de.path().string();
-			if (ends_with_nocase(p, ".zip")) add_zip(p, out);
-			else if (de.file_size(ec) <= (1u << 20)) {
+			if (ends_with_nocase(p, ".zip")) {
+				if (nzip <= 40 || wanted_zip_name(de.path().stem().string())) add_zip(p, out);
+			} else if (nloose <= 300 && de.file_size(ec) <= (1u << 20)) {
 				RomFile rf; rf.name = de.path().filename().string();
 				if (read_all(p, rf.data) && !rf.data.empty()) { rf.crc = crc32(rf.data.data(), rf.data.size()); out.push_back(std::move(rf)); }
 			}
@@ -1839,6 +1859,235 @@ static SDL_Texture *make_font_atlas(SDL_Renderer *ren, const uint8_t g[128][8])
 /* ===================================================================== */
 using namespace cb;
 
+/* ===================================================================== */
+/*  launcher: choose the game, find the ROM folder                       */
+/* ===================================================================== */
+/* The folders the user pointed us to (browse button, drag and drop) and the game played last are kept in
+ * congobongo_roms.txt next to the program, so the next start finds the ROMs by itself. */
+struct RomDirs { std::vector<std::string> dirs; int last = 0; };
+
+static std::string romdirs_path()
+{
+	const char *bp = SDL_GetBasePath();
+	return std::string(bp ? bp : "") + "congobongo_roms.txt";
+}
+static void romdirs_load(RomDirs &r)
+{
+	FILE *f = fopen(romdirs_path().c_str(), "r");
+	if (!f) return;
+	char line[2048];
+	while (fgets(line, sizeof line, f)) {
+		std::string s = line;
+		while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+		if (s.compare(0, 5, "last=") == 0) r.last = atoi(s.c_str() + 5);
+		else if (!s.empty()) r.dirs.push_back(s);
+	}
+	fclose(f);
+}
+static void romdirs_save(const RomDirs &r)
+{
+	FILE *f = fopen(romdirs_path().c_str(), "w");
+	if (!f) return;
+	fprintf(f, "last=%d\n", r.last);
+	for (auto &d : r.dirs) fprintf(f, "%s\n", d.c_str());
+	fclose(f);
+}
+static void romdirs_add(RomDirs &r, const std::string &p)
+{
+	r.dirs.erase(std::remove(r.dirs.begin(), r.dirs.end(), p), r.dirs.end());
+	r.dirs.insert(r.dirs.begin(), p);
+	if (r.dirs.size() > 6) r.dirs.resize(6);
+}
+
+/* every ROM file we can see: the paths from the command line (or, with none, the folder 'roms' and the program's
+ * own folder), plus the folders remembered from earlier runs */
+static std::vector<RomFile> scan_roms(const std::vector<std::string> &paths, const RomDirs &rd)
+{
+	std::vector<RomFile> files;
+	if (paths.empty()) {
+		const char *def[] = { "roms", "." };
+		for (const char *d : def) add_path(d, files);
+		const char *bp = SDL_GetBasePath();
+		if (bp) { add_path(std::string(bp) + "roms", files); add_path(bp, files); }
+	} else for (auto &p : paths) add_path(p, files);
+	for (auto &d : rd.dirs) add_path(d, files);
+	return files;
+}
+
+struct Avail { bool congo = false, zax = false; int zset = -1; };
+static Avail check_roms(const std::vector<RomFile> &files)
+{
+	Avail a; RomSet tmp;
+	a.congo = load_roms(files, tmp, false, true);
+	a.zset = zx::detect_set(files);
+	a.zax = a.zset >= 0;
+	return a;
+}
+
+static Uint32 g_folder_event = 0;
+static std::string g_launcher_shot;     /* developer: --launcher-shot FILE.bmp saves the first frame of the selection window and quits */
+static void SDLCALL folder_dialog_cb(void *, const char *const *list, int)
+{
+	if (!list || !list[0] || !g_folder_event) return;      /* cancelled or failed */
+	SDL_Event e; SDL_zero(e);
+	e.type = g_folder_event; e.user.data1 = SDL_strdup(list[0]);
+	SDL_PushEvent(&e);
+}
+
+/* a tiny software canvas for the launcher (the game's own menu code only exists once a game is running) */
+struct Canvas {
+	int W, H; std::vector<uint32_t> px; uint8_t gl[128][8];
+	Canvas(int w, int h) : W(w), H(h), px((size_t)w * h) { builtin_glyphs(gl); }
+	void rect(int x, int y, int w, int h, uint32_t c)
+	{
+		for (int j = std::max(0, y); j < std::min(H, y + h); j++)
+			for (int i = std::max(0, x); i < std::min(W, x + w); i++) px[(size_t)j * W + i] = c;
+	}
+	void frame(int x, int y, int w, int h, int t, uint32_t c) { rect(x, y, w, t, c); rect(x, y + h - t, w, t, c); rect(x, y, t, h, c); rect(x + w - t, y, t, h, c); }
+	int text_w(const std::string &s, int sc) const { return (int)s.size() * 8 * sc; }
+	void text(int x, int y, int sc, uint32_t c, std::string s)
+	{
+		for (auto &ch : s) ch = (char)toupper((unsigned char)ch);
+		for (size_t k = 0; k < s.size(); k++) {
+			const unsigned char ch = (unsigned char)s[k];
+			if (ch >= 128) continue;
+			for (int r = 0; r < 8; r++) for (int b = 0; b < 8; b++)
+				if ((gl[ch][r] >> (7 - b)) & 1) rect(x + (int)k * 8 * sc + b * sc, y + r * sc, sc, sc, c);
+		}
+	}
+	void centered(int cx, int y, int sc, uint32_t c, const std::string &s) { text(cx - text_w(s, sc) / 2, y, sc, c, s); }
+	/* straight-alpha picture, optionally faded */
+	void blit(const std::vector<uint32_t> &src, int sw, int sh, int x0, int y0, int fade256)
+	{
+		for (int j = 0; j < sh; j++) for (int i = 0; i < sw; i++) {
+			const int X = x0 + i, Y = y0 + j;
+			if (X < 0 || X >= W || Y < 0 || Y >= H) continue;
+			const uint32_t p = src[(size_t)j * sw + i]; const int a = (int)(p >> 24) * fade256 / 256;
+			uint32_t &d = px[(size_t)Y * W + X];
+			const int r = ((int)((p >> 16) & 255) * a + (int)((d >> 16) & 255) * (255 - a)) / 255;
+			const int g = ((int)((p >> 8) & 255) * a + (int)((d >> 8) & 255) * (255 - a)) / 255;
+			const int b = ((int)(p & 255) * a + (int)(d & 255) * (255 - a)) / 255;
+			d = 0xff000000u | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+		}
+	}
+};
+
+static std::string shorten_path(const std::string &p, size_t n)
+{
+	return p.size() <= n ? p : "..." + p.substr(p.size() - (n - 3));
+}
+
+/* Shows the two games.  Returns 1 (Congo Bongo), 2 (Zaxxon) or 0 (quit); 'files' gets the ROMs that were found. */
+static int run_launcher(RomDirs &rd, const std::vector<std::string> &cli_paths, std::vector<RomFile> &files)
+{
+	const int W = 960, H = 540;
+	if (!SDL_Init(SDL_INIT_VIDEO)) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 0; }
+	const bool pad_ok = SDL_InitSubSystem(SDL_INIT_GAMEPAD);
+	SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, "1");
+	SDL_Window *win = SDL_CreateWindow("Congo Bongo / Zaxxon", W, H, SDL_WINDOW_RESIZABLE);
+	SDL_Renderer *ren = win ? SDL_CreateRenderer(win, nullptr) : nullptr;
+	SDL_Texture *tex = ren ? SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, W, H) : nullptr;
+	if (g_launcher_shot.empty() && (!win || !ren || !tex)) { fprintf(stderr, "window/renderer: %s\n", SDL_GetError()); return 0; }
+	SDL_SetRenderVSync(ren, 1);
+	SDL_SetRenderLogicalPresentation(ren, W, H, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+	g_folder_event = SDL_RegisterEvents(1);
+
+	std::vector<SDL_Gamepad *> pads;
+	if (pad_ok) { int n = 0; SDL_JoystickID *ids = SDL_GetGamepads(&n); for (int i = 0; ids && i < n; i++) if (SDL_Gamepad *g = SDL_OpenGamepad(ids[i])) pads.push_back(g); SDL_free(ids); }
+
+	/* the two logos, drawn once */
+	std::vector<uint32_t> lg[2]; int lw[2] = { 1, 1 }, lh[2] = { 1, 1 };
+	for (int g = 0; g < 2; g++) {
+		const LogoSet &L = g ? LOGO_ZAXXON : LOGO_CONGO;
+		logo_render(L, 380, lg[g], lw[g], lh[g]);
+		if (lh[g] > 150) logo_render(L, std::max(40, 380 * 150 / lh[g]), lg[g], lw[g], lh[g]);
+	}
+
+	Avail av = check_roms(files);
+	int sel = rd.last == 2 ? 1 : 0;
+	if (rd.last == 0 || (sel == 0 && !av.congo) || (sel == 1 && !av.zax)) sel = av.zax && !av.congo ? 1 : 0;
+	std::string msg;
+	int result = -1;
+	Canvas cv(W, H);
+	const uint32_t YEL = 0xffffe000u, WHITE = 0xffe8e8e8u, GRN = 0xff40e070u, RED = 0xffff6060u, DIM = 0xff7078a0u;
+	const int PX[2] = { 40, 500 }, PY = 96, PW = 420, PH = 290;
+
+	auto start = [&](int g) -> bool {
+		if (g == 0 ? !av.congo : !av.zax) { msg = "NO ROMS FOUND FOR THIS GAME - PRESS B TO BROWSE"; return false; }
+		result = g + 1; return true;
+	};
+	auto add_dir = [&](const std::string &p) {
+		const Avail old = av;
+		romdirs_add(rd, p); romdirs_save(rd);
+		files = scan_roms(cli_paths, rd); av = check_roms(files);
+		if (!old.zax && av.zax) sel = 1; else if (!old.congo && av.congo) sel = 0;
+		if (!av.congo && !av.zax) msg = "NO CONGO BONGO OR ZAXXON ROMS IN: " + shorten_path(p, 60);
+		else msg = std::string("ROMS FOUND:") + (av.congo ? " CONGO BONGO" : "") + (av.zax ? " ZAXXON" : "");
+	};
+
+	SDL_ShowWindow(win); SDL_RaiseWindow(win);
+	while (result < 0) {
+		SDL_Event ev;
+		while (SDL_PollEvent(&ev)) {
+			if (ev.type == SDL_EVENT_QUIT) result = 0;
+			else if (ev.type == SDL_EVENT_KEY_DOWN) {
+				switch (ev.key.key) {
+				case SDLK_ESCAPE: result = 0; break;
+				case SDLK_LEFT: case SDLK_A: sel = 0; break;
+				case SDLK_RIGHT: case SDLK_D: sel = 1; break;
+				case SDLK_1: sel = 0; break;
+				case SDLK_2: sel = 1; break;
+				case SDLK_RETURN: case SDLK_KP_ENTER: case SDLK_SPACE: case SDLK_Z: if (!ev.key.repeat) start(sel); break;
+				case SDLK_B: case SDLK_O: if (!ev.key.repeat) SDL_ShowOpenFolderDialog(folder_dialog_cb, nullptr, win, nullptr, false); break;
+				default: break;
+				}
+			} else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+				SDL_ConvertEventToRenderCoordinates(ren, &ev);
+				const float mx = ev.button.x, my = ev.button.y;
+				for (int g = 0; g < 2; g++)
+					if (mx >= PX[g] && mx < PX[g] + PW && my >= PY && my < PY + PH) { sel = g; start(g); }
+				if (my >= 426 && my < 454) SDL_ShowOpenFolderDialog(folder_dialog_cb, nullptr, win, nullptr, false);
+			} else if (ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+				if (ev.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_LEFT) sel = 0;
+				else if (ev.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT) sel = 1;
+				else if (ev.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH || ev.gbutton.button == SDL_GAMEPAD_BUTTON_START) start(sel);
+			} else if (ev.type == SDL_EVENT_DROP_FILE) {
+				if (ev.drop.data) add_dir(ev.drop.data);
+			} else if (g_folder_event && ev.type == g_folder_event) {
+				if (ev.user.data1) { add_dir((const char *)ev.user.data1); SDL_free(ev.user.data1); }
+			}
+		}
+		if (result >= 0) break;
+
+		/* ---- draw ---- */
+		for (int y = 0; y < H; y++) { const uint32_t c = 0xff000000u | (uint32_t)(6 + y / 40) << 16 | (uint32_t)(8 + y / 36) << 8 | (uint32_t)(28 + y / 12); for (int x = 0; x < W; x++) cv.px[(size_t)y * W + x] = c; }
+		cv.centered(W / 2, 28, 4, YEL, "SELECT A GAME");
+		for (int g = 0; g < 2; g++) {
+			const bool on = g == sel, ok = g ? av.zax : av.congo;
+			cv.rect(PX[g], PY, PW, PH, on ? 0xff1c2260u : 0xff0e1034u);
+			cv.frame(PX[g], PY, PW, PH, on ? 4 : 2, on ? YEL : 0xff3c4078u);
+			cv.blit(lg[g], lw[g], lh[g], PX[g] + (PW - lw[g]) / 2, PY + 30 + (150 - lh[g]) / 2, ok ? 256 : 70);
+			cv.centered(PX[g] + PW / 2, PY + 210, 3, ok ? WHITE : DIM, g ? "ZAXXON" : "CONGO BONGO");
+			cv.centered(PX[g] + PW / 2, PY + 254, 2, ok ? GRN : RED, ok ? "READY" : "ROMS NOT FOUND");
+		}
+		cv.centered(W / 2, 404, 2, WHITE, "LEFT/RIGHT: CHOOSE    ENTER: PLAY");
+		cv.centered(W / 2, 432, 2, YEL, "B: BROWSE FOR THE ROM FOLDER");
+		cv.centered(W / 2, 460, 2, WHITE, "OR DROP A ROM FOLDER OR ZIP HERE");
+		cv.centered(W / 2, 492, 1, msg.empty() ? DIM : YEL, msg.empty() ? (rd.dirs.empty() ? "ESC QUITS" : "ROM FOLDER: " + shorten_path(rd.dirs[0], 80)) : msg);
+		if (!g_launcher_shot.empty()) { write_bmp(g_launcher_shot.c_str(), cv.px.data(), W, H); result = 0; break; }
+		SDL_UpdateTexture(tex, nullptr, cv.px.data(), W * 4);
+		SDL_RenderClear(ren);
+		SDL_RenderTexture(ren, tex, nullptr, nullptr);
+		SDL_RenderPresent(ren);
+	}
+
+	for (SDL_Gamepad *g : pads) SDL_CloseGamepad(g);
+	SDL_DestroyTexture(tex); SDL_DestroyRenderer(ren); SDL_DestroyWindow(win);
+	if (result > 0) { rd.last = result; romdirs_save(rd); }
+	return result;
+}
+
+
 static void usage()
 {
 	printf(
@@ -1847,12 +2096,14 @@ static void usage()
 "usage: congobongo [options] [rom-zip-or-folder ...]\n"
 "\n"
 "  With no path, the folder 'roms' and the current folder are searched for\n"
-"  congo.zip / tiptop.zip / zaxxon.zip (or zaxxon2, zaxxon3, zaxxonj, zaxxonb) or loose ROM\n"
-"  files, matched by CRC32.  The game is detected from the ROMs.\n"
+"  congo.zip / tiptop.zip / zaxxon.zip or loose ROM files, matched by CRC32.\n"
+"  When both games are found (or none) a window lets you choose the game; there you can\n"
+"  also browse to your MAME roms folder or drop that folder (or a zip) onto the window.\n"
+"  The folders you pick are remembered in congobongo_roms.txt next to the program.\n"
 "\n"
 "options:\n"
-"  --game NAME      congo or zaxxon: pick one when the ROMs of both are found (default: congo)\n"
-"  --set NAME       Zaxxon: zaxxon, zaxxon2, zaxxon3, zaxxonj or zaxxonb when several sets are present\n"
+"  --game NAME      congo or zaxxon: start that game without the selection window\n"
+"  --launcher       always show the game selection window\n"
 "  --scale N        window scale (default 3)\n"
 "  --no-rotate      do not rotate the picture 90 degrees\n"
 "  --volume X       master volume, 0..2 (default 1)\n"
@@ -1879,11 +2130,12 @@ static void usage()
 "      Zaxxon only: I = swap stick up/down, F2 = service switch (self test),\n"
 "      Esc = options menu (volumes, CRT, scaling, fullscreen), P = pause,\n"
 "      R = rotate view, F3 = reset, F11 = fullscreen, F12 = screenshot, +/- = master volume\n"
+"      drop a ROM folder or zip on the window = back to the game selection with it added\n"
 "\n"
 "Settings from the options menu are saved in congobongo.ini next to the program.\n");
 }
 
-int main(int argc, char **argv)
+static int run_session(int argc, char **argv, bool force_launcher)
 {
 	int scale = 0, rotation = 1;      /* scale: --scale N (0 = use the saved WINDOW SIZE setting) */
 	bool headless = false, sound_only = false, free_play = false;
@@ -1896,7 +2148,8 @@ int main(int argc, char **argv)
 	std::vector<std::pair<uint16_t, uint8_t>> cli_pokes;
 	int font_cli = 0; bool font_cli_set = false; std::string dump_font;
 	int game_cli = 0;                 /* --game: 0 auto, 1 congo, 2 zaxxon */
-	std::string zset_cli; int service_at = -1;   /* --set NAME (Zaxxon ROM set), --service-at N (headless) */
+	int service_at = -1;              /* --service-at N (headless) */
+	bool back_to_launcher = false;    /* the menu's CHANGE GAME, or a folder dropped on the window */
 	int dev_page = -1, dev_crt = -1; std::string dev_out;   /* developer: --menu-shot PAGE:FILE.bmp, --crt N */
 	int lives = 3, bonus = 10000, difficulty = 1;
 	struct InpEv { int f0, f1; unsigned bits; };
@@ -1918,7 +2171,8 @@ int main(int argc, char **argv)
 		if (a == "-h" || a == "--help") { usage(); return 0; }
 		else if (a == "--scale") scale = std::max(1, atoi(next("--scale")));
 		else if (a == "--game") { std::string v = next("--game"); game_cli = (v == "zaxxon" || v == "zax") ? 2 : (v == "congo" || v == "tiptop") ? 1 : 0; if (!game_cli) { fprintf(stderr, "--game wants congo or zaxxon\n"); return 1; } }
-		else if (a == "--set") zset_cli = next("--set");
+		else if (a == "--launcher") force_launcher = true;
+		else if (a == "--launcher-shot") { g_launcher_shot = next("--launcher-shot"); force_launcher = true; }
 		else if (a == "--service-at") service_at = atoi(next("--service-at"));
 		else if (a == "--no-rotate") rotation = 0;
 		else if (a == "--volume") { volume = (float)atof(next("--volume")); vol_given = true; }
@@ -1960,27 +2214,21 @@ int main(int argc, char **argv)
 		else paths.push_back(a);
 	}
 
-	/* ---- find and load the ROMs ---- */
-	std::vector<RomFile> files;
-	if (paths.empty()) {
-		const char *def[] = { "roms", "." };
-		for (const char *d : def) add_path(d, files);
-		const char *bp = SDL_GetBasePath();
-		if (bp) { add_path(std::string(bp) + "roms", files); add_path(bp, files); }
-	} else for (auto &p : paths) add_path(p, files);
-
-	/* which game?  Congo Bongo unless only the Zaxxon ROMs are there (or --game says otherwise) */
-	static RomSet rs;
-	int zset = zx::detect_set(files);
-	if (!zset_cli.empty()) {      /* --set: choose one Zaxxon ROM set when several are present */
-		int want = -1;
-		for (int i = 0; i < zx::N_SETS; i++) if (zset_cli == zx::SETS[i].name) want = i;
-		if (want < 0) { fprintf(stderr, "unknown Zaxxon set '%s' (zaxxon, zaxxon2, zaxxon3, zaxxonj, zaxxonb)\n", zset_cli.c_str()); return 1; }
-		zset = -1;
-		{ std::vector<RomFile> only; for (auto &f : files) only.push_back(f); for (int i = 0; i < zx::N_SETS; i++) if (i == want) { bool has[3] = { false, false, false }; for (auto &f : only) for (int k = 0; k < 3; k++) if (f.crc == zx::SETS[i].main_crc[k]) has[k] = true; if (has[0] && has[1] && has[2]) zset = i; } }
-		if (zset < 0) { fprintf(stderr, "the ROMs of Zaxxon set '%s' were not found\n", zset_cli.c_str()); return 1; }
-		if (game_cli == 0) game_cli = 2;
+	/* ---- find the ROMs; with both games present (or none), or when asked, choose the game in a window ---- */
+	RomDirs romdirs; romdirs_load(romdirs);
+	const bool interactive = !headless && !sound_only && dump_font.empty() && dev_page < 0 && keyscript.empty();
+	std::vector<RomFile> files = scan_roms(paths, romdirs);
+	{
+		const Avail av = check_roms(files);
+		if (interactive && (force_launcher || (game_cli == 0 && av.congo == av.zax))) {
+			const int pick = run_launcher(romdirs, paths, files);
+			if (pick == 0) return 0;
+			game_cli = pick;
+		}
 	}
+
+	static RomSet rs;
+	const int zset = zx::detect_set(files);
 	bool zax = false;
 	{
 		const bool congo_ok = load_roms(files, rs, sound_only, true);
@@ -1988,7 +2236,7 @@ int main(int argc, char **argv)
 		else if (game_cli == 1) zax = false;
 		else zax = !congo_ok && zset >= 0 && !sound_only;
 		if (zax && sound_only) { fprintf(stderr, "--sound-test is only available for Congo Bongo\n"); return 1; }
-		if (zax && zset < 0) { fprintf(stderr, "No Zaxxon ROMs found. Put the MAME zaxxon.zip (or zaxxon2, zaxxon3, zaxxonj, zaxxonb) in a folder called 'roms' next to the program.\n"); return 1; }
+		if (zax && zset < 0) { fprintf(stderr, "No Zaxxon ROMs found. Put the MAME zaxxon.zip in a folder called 'roms' next to the program, or run without options to browse for the folder.\n"); return 1; }
 		if (!zax && !congo_ok) {
 			load_roms(files, rs, sound_only);   /* again, this time listing what is missing */
 			fprintf(stderr,
@@ -2332,7 +2580,7 @@ int main(int argc, char **argv)
 
 	auto page_count = [&](int p) {
 		switch (p) {
-		case PG_MAIN: return 7;
+		case PG_MAIN: return 8;
 		case PG_VIDEO: return 9;
 		case PG_CRT: return 9;
 		case PG_AUDIO: return zax ? 4 : 9;
@@ -2392,7 +2640,8 @@ int main(int argc, char **argv)
 			case 3: change_page(PG_CONTROLS); break;
 			case 4: if (zax) { svc_pulse = 4; close_menu(); } else change_page(PG_CHEATS); break;
 			case 5: game_reset(); refresh_view(); close_menu(); break;
-			case 6: running = false; break;
+			case 6: back_to_launcher = true; running = false; break;
+			case 7: running = false; break;
 			}
 		} else if (page == PG_VIDEO) {
 			switch (sel) {
@@ -2587,11 +2836,11 @@ int main(int argc, char **argv)
 
 		char buf[96]; const char *desc = "";
 		if (page == PG_MAIN) {
-			const char *items[] = { "PLAY", "VIDEO", "AUDIO", "CONTROLS", zax ? "SELF TEST" : "CHEATS", "RESET GAME", "QUIT" };
+			const char *items[] = { "PLAY", "VIDEO", "AUDIO", "CONTROLS", zax ? "SELF TEST" : "CHEATS", "RESET GAME", "CHANGE GAME", "QUIT" };
 			const char *descs[] = { "CLOSE THE MENU", "WINDOW, SCALING AND CRT", "SET THE VOLUMES", "KEYS AND JOYSTICK",
-			                        zax ? "FIRE NEXT, RESET EXITS" : "CHEATS AND RAM FINDER", "START THE GAME OVER", "EXIT THE EMULATOR" };
-			float step = std::min(16.0f, (H - top - 44) / 7.0f), y0 = top;
-			for (int i = 0; i < 7; i++) {
+			                        zax ? "FIRE NEXT, RESET EXITS" : "CHEATS AND RAM FINDER", "START THE GAME OVER", "PICK A GAME OR ROM FOLDER", "EXIT THE EMULATOR" };
+			float step = std::min(16.0f, (H - top - 44) / 8.0f), y0 = top;
+			for (int i = 0; i < 8; i++) {
 				bool on = i == sel;
 				if (on) cursor(52, y0 + i * step, 8);
 				text(66, y0 + i * step, 1, on ? 255 : 222, on ? 255 : 222, on ? 0 : 255, items[i]);
@@ -2790,6 +3039,10 @@ int main(int argc, char **argv)
 		SDL_Event ev;
 		while (SDL_PollEvent(&ev)) {
 			if (ev.type == SDL_EVENT_QUIT) running = false;
+			else if (ev.type == SDL_EVENT_DROP_FILE && ev.drop.data) {   /* a ROM folder or zip dropped on the window: back to the game selection */
+				romdirs_add(romdirs, ev.drop.data); romdirs_save(romdirs);
+				back_to_launcher = true; running = false;
+			}
 			else if (ev.type == SDL_EVENT_GAMEPAD_ADDED) open_pad(ev.gdevice.which);
 			else if (ev.type == SDL_EVENT_GAMEPAD_REMOVED) {
 				for (size_t i = 0; i < pads.size(); i++)
@@ -2937,5 +3190,15 @@ int main(int argc, char **argv)
 	SDL_DestroyRenderer(ren);
 	SDL_DestroyWindow(win);
 	SDL_Quit();
-	return 0;
+	return back_to_launcher ? 100 : 0;
+}
+
+int main(int argc, char **argv)
+{
+	bool again = false;
+	for (;;) {
+		const int r = run_session(argc, argv, again);
+		if (r != 100) return r;
+		again = true;          /* CHANGE GAME (or a folder dropped on the game window): show the game selection again */
+	}
 }

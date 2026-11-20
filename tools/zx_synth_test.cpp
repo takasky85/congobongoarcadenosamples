@@ -9,12 +9,13 @@ static void wav(const char *n, const std::vector<int16_t> &s)
 	fwrite("RIFF", 1, 4, f); fwrite(&t, 4, 1, f); fwrite("WAVEfmt ", 1, 8, f); fwrite(&sixteen, 4, 1, f); fwrite(&one, 2, 1, f); fwrite(&ch, 2, 1, f);
 	fwrite(&r, 4, 1, f); fwrite(&br, 4, 1, f); fwrite(&ba, 2, 1, f); fwrite(&bits, 2, 1, f); fwrite("data", 1, 4, f); fwrite(&d, 4, 1, f); fwrite(s.data(), 2, s.size(), f); fclose(f);
 }
-int main()
+int main(int argc, char **argv)
 {
+	const char *outdir = argc > 1 ? argv[1] : nullptr; int idx = 0;
 	struct T { const char *name; int port; uint8_t mask; double hold, total; } tests[] = {
-		{ "fly C (PA3 low, PA2 low)", 0, 0x0c, 2.0, 3.0 }, { "fly D (PA3 low, PA2 high)", 0, 0x08, 2.0, 3.0 },
-		{ "homing missile PA4", 0, 0x10, 1.5, 2.5 }, { "base missile PA5", 0, 0x20, 0.02, 5.0 }, { "laser PA6", 0, 0x40, 0.02, 1.0 },
-		{ "battleship PA7", 0, 0x80, 1.5, 2.5 }, { "S-EXP PB4", 1, 0x10, 0.02, 2.0 }, { "M-EXP PB5", 1, 0x20, 0.02, 3.0 },
+		{ "engine lo (PA2)", 0, 0x04, 2.0, 3.0 }, { "engine mid (PA3)", 0, 0x08, 2.0, 3.0 },
+		{ "homing missile PA4", 0, 0x10, 0.4, 0.9 }, { "base missile PA5", 0, 0x20, 0.02, 1.0 }, { "laser PA6", 0, 0x40, 0.6, 1.0 },
+		{ "battleship PA7", 0, 0x80, 0.4, 0.9 }, { "S-EXP PB4", 1, 0x10, 0.02, 2.0 }, { "M-EXP PB5", 1, 0x20, 0.02, 5.0 },
 		{ "cannon PB7", 1, 0x80, 0.02, 2.0 }, { "shot PC0", 2, 0x01, 0.02, 1.0 }, { "alarm2 PC2", 2, 0x04, 0.02, 0.6 }, { "alarm3 PC3", 2, 0x08, 0.02, 0.6 } };
 	zxs::Synth s; s.reset(48000); std::vector<int16_t> all;
 	for (auto &t : tests) {
@@ -36,6 +37,8 @@ int main()
 		for (int w = 0; w + 12000 <= n && w < 12000 * 8; w += 12000) { double q = 0; for (int i = 0; i < 12000; i++) q += o[w + i] * o[w + i]; printf(" %.3f", std::sqrt(q / 12000)); }
 		printf("\n");
 		for (int i = 0; i < 12000; i++) all.push_back(0);
+		if (outdir) { std::vector<int16_t> one; for (double y : o) one.push_back((int16_t)std::lrint(std::max(-1.0, std::min(1.0, y * 1.4)) * 30000)); char fn[300]; snprintf(fn, sizeof fn, "%s/%02d.wav", outdir, idx); wav(fn, one); }
+		idx++;
 	}
 	wav("/home/claude/zx_out/synth_all.wav", all);
 }
