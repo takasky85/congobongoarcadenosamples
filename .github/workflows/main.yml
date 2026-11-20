@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag to create for a manual run (e.g. 1.1.0)'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -49,6 +54,8 @@ jobs:
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
           else
             VERSION="v0.0.0-manual-$(date +'%Y%m%d-%H%M%S')"
           fi
@@ -63,5 +70,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
           files: |
             congobongo-windows.zip
