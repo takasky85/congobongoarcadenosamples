@@ -1,0 +1,61 @@
+name: libretro core
+
+on:
+  push:
+    paths:
+      - 'libretro/**'
+      - 'congobongo.cpp'
+      - 'z80.c'
+      - 'z80.h'
+      - 'congo_*.h'
+      - '.github/workflows/libretro.yml'
+    tags:
+      - 'core-v*'
+  pull_request:
+    paths:
+      - 'libretro/**'
+      - 'congobongo.cpp'
+      - '.github/workflows/libretro.yml'
+  workflow_dispatch:
+
+jobs:
+  android-armeabi-v7a:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with the Android NDK (32-bit ARM)
+        run: |
+          "$ANDROID_NDK_LATEST_HOME/ndk-build" -C libretro/jni -j"$(nproc)"
+          mkdir -p out
+          cp libretro/libs/armeabi-v7a/libretro.so out/congobongo_libretro_android.so
+          cp libretro/congobongo_libretro.info out/
+          file out/congobongo_libretro_android.so
+          ls -l out
+
+      - name: Package core zip (.so + .info)
+        run: cd out && zip -9 ../congobongo_libretro_android_armeabi-v7a.zip congobongo_libretro_android.so congobongo_libretro.info
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: congobongo_libretro_android_armeabi-v7a
+          path: congobongo_libretro_android_armeabi-v7a.zip
+
+      - name: Release (core-v* tags only)
+        if: startsWith(github.ref, 'refs/tags/core-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: congobongo_libretro_android_armeabi-v7a.zip
+
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (compile check and desktop core)
+        run: make -C libretro -j"$(nproc)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: congobongo_libretro_linux_x86_64
+          path: libretro/congobongo_libretro.so

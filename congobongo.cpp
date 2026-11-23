@@ -14,7 +14,9 @@
  * See README.md for keys and options.  Third-party code, data and licenses: README.md ("Licenses and
  * credits") and THIRD-PARTY-NOTICES.txt (MAME BSD-3-Clause, puff, Press Start 2P OFL, SDL3 zlib).
  */
+#ifndef CB_LIBRETRO   /* the libretro core (libretro.cpp) uses only the emulation, not SDL */
 #include <SDL3/SDL.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -1066,6 +1068,8 @@ struct Machine {
 
 static Machine M;
 
+#ifndef CB_LIBRETRO
+
 /* ===================================================================== */
 /*  Cheats: cheats.txt next to the program, one per line:                 */
 /*      Name = 8123:09, 8124:09        (hex address : hex value)          */
@@ -1817,7 +1821,11 @@ static SDL_Texture *make_font_atlas(SDL_Renderer *ren, const uint8_t g[128][8])
 	return t;
 }
 
+#endif /* !CB_LIBRETRO */
+
 } // namespace cb
+
+#ifndef CB_LIBRETRO
 
 /* ===================================================================== */
 /*  main                                                                 */
@@ -2813,3 +2821,4 @@ int main(int argc, char **argv)
 	SDL_Quit();
 	return 0;
 }
+#endif /* !CB_LIBRETRO */

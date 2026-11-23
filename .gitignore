@@ -1,0 +1,5 @@
+libretro/*.so
+libretro/*.dll
+libretro/*.dylib
+libretro/libs/
+libretro/obj/

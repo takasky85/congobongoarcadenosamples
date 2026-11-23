@@ -1,0 +1,33 @@
+# Software Information
+display_name = "Sega - Congo Bongo (Congo Bongo)"
+authors = "takasky85"
+supported_extensions = "zip"
+corename = "Congo Bongo"
+categories = "Emulator"
+license = "See README (MAME-derived parts BSD-3-Clause)"
+permissions = ""
+display_version = "1.0"
+
+# Hardware Information
+manufacturer = "Sega"
+systemname = "Arcade (Congo Bongo / Tip Top)"
+systemid = "arcade"
+
+# Libretro Features
+database = "MAME"
+supports_no_game = "false"
+savestate = "true"
+savestate_features = "deterministic"
+cheats = "false"
+input_descriptors = "true"
+memory_descriptors = "false"
+libretro_saves = "false"
+core_options = "true"
+core_options_version = "1.0"
+load_subsystem = "false"
+hw_render = "false"
+needs_fullpath = "true"
+disk_control = "false"
+is_experimental = "false"
+
+description = "Congo Bongo / Tip Top (Sega, 1983). Runs the real sound ROM and synthesizes the analog drums and gorilla from circuit models, so no samples are needed. Load the MAME congo.zip (rev C) or tiptop.zip (with congo.zip beside it)."

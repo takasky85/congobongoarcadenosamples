@@ -185,6 +185,23 @@ addresses as in MAME's debugger and cheat files). `--poke 8123:09` does the same
 Not emulated: service switch / test mode NMI, cocktail 2-player controls,
 gamepads, save states.
 
+## libretro core (RetroArch)
+
+`libretro/` builds the same emulation as a libretro core (no SDL, no menu: RetroArch provides those).
+
+* Android, 32-bit ARM: the "libretro core" GitHub Actions workflow builds
+  `congobongo_libretro_android_armeabi-v7a.zip` (the core `.so` plus `congobongo_libretro.info`).
+  Locally: `ndk-build -C libretro/jni`, then rename `libretro/libs/armeabi-v7a/libretro.so` to
+  `congobongo_libretro_android.so`.
+* Linux / Windows (MSYS2) / macOS: `make -C libretro`.
+
+Load `congo.zip` (MAME set) as content. `tiptop.zip` needs `congo.zip` in the same folder or in
+RetroArch's system folder. Controls (RetroPad): d-pad or left stick move, B / A / Y jump, Select or L
+coin, Start 1 player start, R 2 player start. With the "Start button inserts a coin" option (on by
+default) Start alone drops a coin and starts a game, which suits a TV remote. Core options cover
+orientation (vertical like the cabinet, or horizontal), lives / free play, bonus, difficulty, the
+built-in cheats, treble cut, bass edge and the music / drums / gorilla volumes. Save states work.
+
 ## Status and reporting problems
 
 The Z80 core passes the standard zexdoc and zexall instruction exercisers.
