@@ -16,6 +16,8 @@ on:
       - 'libretro/**'
       - 'congobongo.cpp'
       - '.github/workflows/libretro.yml'
+  release:
+    types: [published]
   workflow_dispatch:
 
 jobs:
