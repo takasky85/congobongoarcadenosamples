@@ -189,10 +189,11 @@ gamepads, save states.
 
 `libretro/` builds the same emulation as a libretro core (no SDL, no menu: RetroArch provides those).
 
-* Android, 32-bit ARM: the "libretro core" GitHub Actions workflow builds
-  `congobongo_libretro_android_armeabi-v7a.zip` (the core `.so` plus `congobongo_libretro.info`).
-  Locally: `ndk-build -C libretro/jni`, then rename `libretro/libs/armeabi-v7a/libretro.so` to
-  `congobongo_libretro_android.so`.
+* Android, 32-bit and 64-bit ARM: the "libretro core" GitHub Actions workflow builds
+  `congobongo_libretro_android_armeabi-v7a.zip` (32-bit) and `congobongo_libretro_android_arm64-v8a.zip`
+  (64-bit), each holding the core `.so` plus `congobongo_libretro.info`. Use the one that matches your
+  RetroArch (a 64-bit RetroArch needs the arm64-v8a core). Locally: `ndk-build -C libretro/jni`, then
+  rename `libretro/libs/<abi>/libretro.so` to `congobongo_libretro_android.so`.
 * Linux / Windows (MSYS2) / macOS: `make -C libretro`.
 
 Load `congo.zip` (MAME set) as content. `tiptop.zip` needs `congo.zip` in the same folder or in
